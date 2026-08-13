@@ -1,0 +1,14 @@
+{
+  "name": "crucible",
+  "owner": {
+    "name": "Chase AI",
+    "url": "https://youtube.com/@chaseai"
+  },
+  "plugins": [
+    {
+      "name": "crucible",
+      "source": "./",
+      "description": "Plan hardening: recon → interrogate → adversarial Codex review (→ cross-model build). Ships /crucible:crucible, /crucible:codex-review, /crucible:codex-build."
+    }
+  ]
+}
