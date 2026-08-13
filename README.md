@@ -54,6 +54,17 @@ Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\
 
 Then in Claude Code: `/crucible` (or `/codex-review`, `/codex-build`).
 
+## Updating from grill-me-codex
+
+This repo **was** `grill-me-codex` — GitHub redirects the old URL, so your existing clone still works:
+
+```bash
+git pull                             # follows the redirect automatically
+cp -r skills/* ~/.claude/skills/     # same copy as install (PowerShell: Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\)
+```
+
+That adds `crucible` and refreshes the legacy skills so `/grill-me-codex` now points people at `/crucible`. Optionally update your remote to the new name (`git remote set-url origin https://github.com/chaseai-yt/crucible.git`) and delete the legacy folders from `~/.claude/skills/` if you want only the new pipeline — `/crucible` doesn't need them.
+
 ## Prerequisites
 
 - **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`.
