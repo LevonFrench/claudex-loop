@@ -23,14 +23,14 @@ Crucible closes both gaps: Claude locks intent *with you*, then **OpenAI Codex**
 
 ```mermaid
 flowchart LR
-    A["🔍 Phase 0<br/><b>RECON</b><br/>codebase recon or<br/>greenfield research"] --> L["📋 Assumptions Ledger<br/><i>you confirm in one batch</i>"]
-    L --> B["🎯 Phase 1<br/><b>INTERROGATE</b><br/>load-bearing questions,<br/>one at a time"]
-    B --> P["PLAN.md<br/><i>locked</i>"]
-    P --> C["⚔️ Phase 2<br/><b>REVIEW</b><br/>Codex attacks in a<br/>read-only sandbox"]
-    C -->|"VERDICT: REVISE"| R["Claude arbitrates<br/>+ revises"]
-    R -->|"same session,<br/>next round"| C
-    C -->|"VERDICT: APPROVED"| S["✍️ You sign off"]
-    S -.->|optional| D["🔨 Phase 3<br/><b>BUILD</b><br/>Codex writes,<br/>Claude verifies"]
+    A["🔍 RECON<br>codebase recon or<br>greenfield research"] --> L["📋 Assumptions Ledger<br>you confirm in one batch"]
+    L --> B["🎯 INTERROGATE<br>load-bearing questions<br>one at a time"]
+    B --> P["PLAN.md locked"]
+    P --> C["⚔️ REVIEW<br>Codex attacks in a<br>read-only sandbox"]
+    C -- REVISE --> R["Claude arbitrates<br>and revises"]
+    R -- same session --> C
+    C -- APPROVED --> S["✍️ You sign off"]
+    S -. optional .-> D["🔨 BUILD<br>Codex writes<br>Claude verifies"]
 ```
 
 **You enter at three points only:** confirming the ledger, answering the interview, signing off the converged plan. Codex is read-only throughout review and never touches a file.
