@@ -1,15 +1,6 @@
 <div align="center">
 
-```ansi
-[1;31m██████╗  ██╗       █████╗  ██╗   ██╗ ██████╗  ███████╗ ██╗  ██╗[0m  [1;32m██╗       ██████╗   ██████╗  ██████╗ [0m
-[1;31m██╔════╝ ██║      ██╔══██╗ ██║   ██║ ██╔══██╗ ██╔════╝ ╚██╗██╔╝[0m  [1;32m██║      ██╔═══██╗ ██╔═══██╗ ██╔══██╗[0m
-[1;31m██║      ██║      ███████║ ██║   ██║ ██║  ██║ █████╗    ╚███╔╝ [0m  [1;32m██║      ██║   ██║ ██║   ██║ ██████╔╝[0m
-[1;31m██║      ██║      ██╔══██║ ██║   ██║ ██║  ██║ ██╔══╝    ██╔██╗ [0m  [1;32m██║      ██║   ██║ ██║   ██║ ██╔═══╝ [0m
-[1;31m╚██████╗ ███████╗ ██║  ██║ ╚██████╔╝ ██████╔╝ ███████╗ ██╔╝ ██╗[0m  [1;32m███████╗ ╚██████╔╝ ╚██████╔╝ ██║     [0m
-[1;31m╚═════╝  ╚══════╝ ╚═╝  ╚═╝  ╚═════╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═╝[0m  [1;32m╚══════╝  ╚═════╝   ╚═════╝  ╚═╝     [0m
-
-[90m        two models · one argument · zero echo chamber[0m
-```
+<img src="assets/logo.svg" alt="CLAUDEX LOOP" width="719">
 
 ### Two AI models harden your plan before a line of code exists — then swap jobs to build it.
 
@@ -70,18 +61,7 @@ Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the fu
 
 From the first end-to-end greenfield run (a solo-creator CRM):
 
-```ansi
-[90m$ [0m[1m/claudex-loop[0m[90m research=web[0m
-[36m● PHASE 0 — RECON[0m        assumptions ledger: batch-confirmed in one reply
-[36m● PHASE 1 — INTERROGATE[0m  decision map: load-bearing asked 1-by-1, cosmetic batched
-[36m● PHASE 2 — REVIEW[0m
-  ROUND 1 ▸ [33mVERDICT: REVISE[0m    26 findings
-  ROUND 2 ▸ [33mVERDICT: REVISE[0m    15 findings
-  ROUND 3 ▸ [33mVERDICT: REVISE[0m    12 findings
-  ROUND 4 ▸ [33mVERDICT: REVISE[0m     2 findings
-  ROUND 5 ▸ [1;32mVERDICT: APPROVED[0m   0 findings
-[1;32m✔[0m plan locked — [1mPLAN-REVIEW-LOG.md[0m holds the whole argument
-```
+<p align="center"><img src="assets/run.svg" alt="A claudex-loop run: recon, interrogate, then five Codex review rounds converging 26 findings to 0 and VERDICT: APPROVED" width="547"></p>
 
 - **55 findings across 5 rounds** — converging 26 → 15 → 12 → 2 → 0
 - **1 fatal:** an access-path architecture that could not be built as written (read as completely plausible)
