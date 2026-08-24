@@ -1,19 +1,20 @@
 ---
 name: claudex-loop
-description: Three-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. Use when the user says "/claudex-loop", "claudex this", "run the claudex loop", "/crucible" (legacy), "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /codex-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
+description: Four-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. PHASE 3 BUILD (optional) — you pick the builder and the models swap jobs: Codex builds via codex-build and Claude reads the full diff + runs the proof itself; Claude builds and a fresh read-only Codex session cross-inspects the diff (on by default, logged opt-out only); either way you approve the final diff. Use when the user says "/claudex-loop", "claudex this", "run the claudex loop", "/crucible" (legacy), "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /codex-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
 ---
 
-# Claudex-Loop — Recon, Interrogate, Review
+# Claudex-Loop — Recon, Interrogate, Review, Build
 
 _(Renamed from Crucible 2026-08-16. Old trigger phrases still work.)_
 
-Three phases, three failure modes killed:
+Four phases, four failure modes killed:
 
 - **Phase 0 — RECON** kills *interviewing blind*: Claude scouts the terrain (code or research) before asking you anything, so the interview starts informed instead of generic.
 - **Phase 1 — INTERROGATE** kills *building the wrong thing*: Claude interrogates you until intent is locked — but only on decisions that are actually load-bearing.
 - **Phase 2 — REVIEW** kills *a plan that sounds right but breaks*: a different model (Codex) attacks the locked plan. Cross-model = no echo chamber.
+- **Phase 3 — BUILD** *(optional)* kills *grading your own work*: one model implements the locked plan, the rival model grades the diff — in both directions.
 
-You enter at three points only: confirming the assumptions ledger, answering the fire, and signing off the converged plan. Codex is read-only the whole time and never touches a file. **No code is written during any phase.**
+You enter at four points only: confirming the assumptions ledger, answering the fire, signing off the converged plan, and approving the final diff if you build. Codex is read-only throughout recon, interrogation, and review — **no code is written until you sign off the converged plan.**
 
 ---
 
