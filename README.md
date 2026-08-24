@@ -30,28 +30,32 @@ flowchart LR
     C -- REVISE --> R["Claude arbitrates<br>and revises"]
     R -- same session --> C
     C -- APPROVED --> S["✍️ You sign off"]
-    S -. optional .-> D["🔨 BUILD<br>Codex writes<br>Claude verifies"]
+    S -. optional .-> D["🔨 BUILD<br>one model writes"]
+    D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
+    I --> G["✅ You approve<br>the final diff"]
     classDef claude fill:#d97757,stroke:#7a3a24,color:#fff
     classDef codex fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
     classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
     class A,B,R claude
     class C,D codex
-    class L,S human
+    class I artifact
+    class L,S,G human
     class P artifact
 ```
 
-**You enter at three points only:** confirming the ledger, answering the interview, signing off the converged plan. Codex is read-only throughout review and never touches a file.
+**You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Codex is read-only throughout review and never touches a file.
 
-## The three phases
+## The four phases
 
 | | What happens | What makes it different |
 |---|---|---|
-| **🔍 RECON** | Claude scouts *before* asking you anything — explores the codebase and living docs, or on greenfield researches prior art, stacks, and known pitfalls (research depth is a gate **you** control, up to a multi-agent deep-research workflow) | Opens with an **Assumptions Ledger**: everything already resolved, batch-confirmed in one reply. The interview never wastes questions the code or research already answered |
-| **🎯 INTERROGATE** | A visible **decision map** splits open decisions into load-bearing (asked one at a time) and cosmetic (batched, veto-by-exception) | Every question must justify its existence: *why it matters*, a committed *recommendation*, and *what breaks if we guess wrong*. Escape hatch: "accept all remaining recommendations" |
-| **⚔️ REVIEW** | Codex reviews `PLAN.md` in a read-only sandbox → `VERDICT: APPROVED` or `REVISE` with concrete flaws. Claude arbitrates (rejects bad critiques *with logged reasons*), revises, and resumes the **same Codex session** | The reviewer remembers its prior findings and attacks its own accepted fixes. Bounded by `MAX_ROUNDS` — a flagged deadlock beats a fake "approved" |
+| **🔍 0 — RECON** | Claude scouts *before* asking you anything — explores the codebase and living docs, or on greenfield researches prior art, stacks, and known pitfalls (research depth is a gate **you** control, up to a multi-agent deep-research workflow) | Opens with an **Assumptions Ledger**: everything already resolved, batch-confirmed in one reply. The interview never wastes questions the code or research already answered |
+| **🎯 1 — INTERROGATE** | A visible **decision map** splits open decisions into load-bearing (asked one at a time) and cosmetic (batched, veto-by-exception) | Every question must justify its existence: *why it matters*, a committed *recommendation*, and *what breaks if we guess wrong*. Escape hatch: "accept all remaining recommendations" |
+| **⚔️ 2 — REVIEW** | Codex reviews `PLAN.md` in a read-only sandbox → `VERDICT: APPROVED` or `REVISE` with concrete flaws. Claude arbitrates (rejects bad critiques *with logged reasons*), revises, and resumes the **same Codex session** | The reviewer remembers its prior findings and attacks its own accepted fixes. Bounded by `MAX_ROUNDS` — a flagged deadlock beats a fake "approved" |
+| **🔨 3 — BUILD** *(optional)* | You pick the builder. **Codex builds** (`codex-build`, full write access) → Claude reads the entire diff like a contributor PR and runs the proof test itself. **Claude builds** → a *fresh* read-only Codex session cross-inspects the finished diff against the plan — on by default, findings arbitrated and logged | The final code is always graded by the rival model, whichever one wrote it. Skipping the inspection requires an explicit, logged opt-out |
 
-**Phase 3 (optional) — the roles flip.** `codex-build` hands the frozen plan to Codex with full write access; Claude becomes the critic, reads the entire diff like a contributor PR, and runs the proof test itself. Cross-model checks in both directions — nobody grades their own work.
+**The invariant across all four:** *whoever made the thing never checks the thing.* Plan by Claude → attacked by Codex. Code by Codex → reviewed by Claude. Code by Claude → inspected by Codex. No one grades their own work, in any path.
 
 Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the full round-by-round argument — the *why*).
 
