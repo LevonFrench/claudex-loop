@@ -1,6 +1,6 @@
 ---
 name: crucible
-description: Three-phase plan hardening — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts the terrain first; on an existing codebase it explores code + docs (CONTEXT.md/ADRs) and drafts an assumptions ledger, on a greenfield project it researches prior art, stack choices, and known pitfalls instead. PHASE 1 INTERROGATE — the interview, rebuilt: confirm the ledger in one batch, then interrogate only the load-bearing decisions one at a time (each question carries why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), batching cosmetic ones, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT:APPROVED/REVISE), Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. Use when the user says "/crucible", "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. If you already have a locked plan and want only the Codex loop use /codex-review. NOT for reviewing already-written code (use /codex:review) and NOT for trivial changes.
+description: Three-phase plan hardening — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. Use when the user says "/crucible", "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /codex-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
 ---
 
 # Crucible — Recon, Interrogate, Review
@@ -43,7 +43,19 @@ Don't silently pick a research depth — offer the tiers with a recommendation b
 
 If invoked with `research=none|web|deep`, skip the question and use that tier.
 
-**If `deep` is chosen: draft the research prompt and get sign-off before launching.** Show the user the topic framing + the 3-5 specific questions the assumptions ledger needs answered (not a generic "research X" — questions shaped like "what do teams building X get wrong about auth?" / "what's the current standard stack for Y and why?"). The user edits or approves, THEN author the workflow script with the approved questions as its `args` and run it. Save the synthesized brief to `inbox/research/YYYY-MM-DD-<slug>-crucible-research.md` (with `## Key Takeaways`) — link it from the ledger entries it sourced and from `PLAN.md`.
+**If `deep` is chosen: draft the research prompt and get sign-off before launching.** Show the user the topic framing + the 3-5 specific questions the assumptions ledger needs answered (not a generic "research X" — questions shaped like "what do teams building X get wrong about auth?" / "what's the current standard stack for Y and why?"). The user edits or approves, THEN author the workflow script with the approved questions as its `args` and run it. Save the synthesized brief to `docs/research/YYYY-MM-DD-<slug>-crucible-research.md` (or your notes location of choice, with `## Key Takeaways`) — link it from the ledger entries it sourced and from `PLAN.md`.
+
+### Skill inventory scan (both terrains, after terrain detection)
+Both benches carry installed skill packs. Enumerate and match against the task's domain:
+
+- **Claude side:** list `~/.claude/skills/` (folder names + frontmatter `description` first lines are enough — don't read full SKILL.mds during recon).
+- **Codex side:** list `~/.agents/skills/` (the `skills` CLI's Codex install target).
+
+Filter to skills whose descriptions match the project's domain (e.g. a three.js game matches the `threejs-*` pack; an email feature matches resend skills). Record hits in the Assumptions Ledger as proposed toolchain entries, never auto-loads:
+
+> "threejs-game-skills pack installed on BOTH agents (9 skills incl. aaa-graphics-builder, gameplay-systems, 3d/image/audio generators) — proposing the build phase load graphics-builder + gameplay-systems, and the asset track use the generator skills. — source: skill inventory scan"
+
+If a matched skill exists on only one bench, say which. If a Codex-side skill's loading behavior under headless `codex exec` is unverified, ledger that as an assumption to smoke-test before the build phase counts on it. **Discovery informs the plan; nothing loads unless `PLAN.md`'s `## Toolchain` section names it and survives review.**
 
 ### Output: the Assumptions Ledger
 End Phase 0 by presenting a single batch — NOT one-at-a-time — of everything Claude resolved on its own:
@@ -117,6 +129,9 @@ _Locked via crucible — by Claude + <user>_
 ## Key decisions & tradeoffs
 <the contestable choices the interrogation resolved — name them so Codex has something to bite; link any ADRs; mark any locked via the escape hatch>
 
+## Toolchain
+<only when the skill inventory scan matched something — which installed skills each build track MUST load and follow, per agent (Claude / Codex), plus any generator skills or MCP capabilities the build depends on. Omit the section entirely on no matches. Reviewable like everything else: Codex should attack unused relevant skills and unjustified inclusions alike>
+
 ## Assumptions
 <the confirmed ledger — with sources>
 
@@ -152,6 +167,8 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
 | `PLAN_FILE` | `PLAN.md` | The plan Phase 1 produced. |
 | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | Append-only argument transcript. The artifact. |
 | `research` | ask | `none` / `web` / `deep` — pre-answers the Phase 0 research gate. `deep` = the deep-research dynamic workflow (prompt still shown for sign-off first). |
+| `inspect` | `on` | Post-build cross-inspection of Claude-built code by a fresh read-only Codex session. `off` = skip (logged as an explicit opt-out, never silently). |
+| `MAX_INSPECTION_ROUNDS` | `2` | Initial post-build review + one reinspection after accepted fixes. |
 
 If invoked with e.g. `rounds=3`, use that for `MAX_ROUNDS`. Echo resolved values before starting.
 
@@ -189,12 +206,22 @@ Both `codex exec` and `codex exec resume` support `--json` and `-o/--output-last
 3. If round > `MAX_ROUNDS` → break to Resolution (deadlock).
 
 ### Resolution (you sign off — final gate)
-- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the crucible improved, and the round count. Ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/codex-build`), Claude builds it, or stop here?"* Code only on a yes.
+- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. Ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/codex-build`), Claude builds it, or stop here?"* Code only on a yes.
 - **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved."
 
 ### PHASE 3 (optional) — BUILD (Codex ↔ Claude, roles flipped)
 
-If the user picks Codex: invoke the `codex-build` skill with `SPEC_FILE=PLAN.md` and the same `LOG_FILE` — it appends `## Act 3 — Build` to the log, so one artifact tells the whole story (reconned → interrogated → reviewed → built → verified). Roles flip: Codex writes the code with full access, Claude reviews the diff and runs the proof. If the user picks Claude, implement directly as usual.
+If the user picks Codex: invoke the `codex-build` skill with `SPEC_FILE=PLAN.md` and the same `LOG_FILE` — it appends `## Act 3 — Build` to the log, so one artifact tells the whole story (reconned → interrogated → reviewed → built → verified). Roles flip: Codex writes the code with full access, Claude reviews the diff and runs the proof. If the user picks Claude, implement directly as usual — then run the **post-build cross-inspection** (below).
+
+### Post-build cross-inspection (default on every Claude-built path)
+
+The doctrine is *whoever made the thing never checks the thing* — that applies to Claude's code too. After Claude implements and the proof gates pass:
+
+1. Launch a **fresh read-only Codex session** (`codex exec -s read-only`, NEW thread — not the Phase 2 thread; the reviewer should see the code cold, not through its own plan critiques). Give it: `PLAN.md`, the base commit, and the code diff. Ask for PR-style findings — correctness, spec fidelity, edge cases, nothing outside scope — no verdict line needed; this is advisory review, not a gate loop.
+2. Claude arbitrates each finding: accept (fix it, rerun affected tests) or reject *with a logged reason*. Cap at `MAX_INSPECTION_ROUNDS=2` (initial review + one reinspection after accepted fixes).
+3. Append to `LOG_FILE` under `## Post-build inspection`: findings verbatim, Claude's dispositions, rounds used. Present the summary alongside the final diff at the human gate.
+
+Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)
 
 ---
 
@@ -209,7 +236,7 @@ If the user picks Codex: invoke the `codex-build` skill with `SPEC_FILE=PLAN.md`
 - `CONTEXT.md` stays a glossary only — never implementation details.
 
 ## What NOT to do
-- Don't review already-written code — that's `/codex:review`.
+- Don't invoke this skill just to review pre-existing code — that's `/codex:review`. (Code built BY this skill does get reviewed — that's the post-build cross-inspection, and it's on by default.)
 - Don't pin a `-codex` model variant on ChatGPT-account auth — it 400s.
 - Don't let Codex edit files. Read-only, always.
 - Don't skip Phase 1 — the interrogation is half the value.
