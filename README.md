@@ -4,8 +4,6 @@
 
 ### Two AI models harden your plan before a line of code exists — then swap jobs to build it.
 
-*(Formerly **crucible** — same skill, new name. GitHub redirects the old URLs.)*
-
 [![Stars](https://img.shields.io/github/stars/chaseai-yt/claudex-loop?style=flat&color=e8590c)](https://github.com/chaseai-yt/claudex-loop/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-skill%20%2B%20plugin-d97757)](https://docs.anthropic.com/en/docs/claude-code)
