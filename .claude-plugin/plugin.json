@@ -1,11 +1,11 @@
 {
-  "name": "crucible",
-  "description": "Plan hardening for Claude Code: recon → interrogate → adversarial Codex review. Two AI models harden your plan before a line of code exists — then swap jobs to build it. Includes crucible, codex-review, and codex-build.",
+  "name": "claudex-loop",
+  "description": "Plan hardening for Claude Code: recon → interrogate → adversarial Codex review. Two AI models harden your plan before a line of code exists — then swap jobs to build it. Includes claudex-loop (formerly crucible), codex-review, and codex-build.",
   "author": {
     "name": "Chase AI",
     "url": "https://youtube.com/@chaseai"
   },
-  "homepage": "https://github.com/chaseai-yt/crucible",
+  "homepage": "https://github.com/cth9191/claudex-loop",
   "license": "MIT",
   "keywords": ["planning", "codex", "cross-model", "adversarial-review", "skills"]
 }

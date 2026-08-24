@@ -1,15 +1,17 @@
 <div align="center">
 
-# 🔥 crucible
+# 🔁 claudex-loop
 
 ### Two AI models harden your plan before a line of code exists — then swap jobs to build it.
 
-[![Stars](https://img.shields.io/github/stars/chaseai-yt/crucible?style=flat&color=e8590c)](https://github.com/chaseai-yt/crucible/stargazers)
+*(Formerly **crucible** — same skill, new name. GitHub redirects the old URLs.)*
+
+[![Stars](https://img.shields.io/github/stars/cth9191/claudex-loop?style=flat&color=e8590c)](https://github.com/cth9191/claudex-loop/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-skill%20%2B%20plugin-d97757)](https://docs.anthropic.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/OpenAI_Codex-adversarial_reviewer-10a37f)](https://github.com/openai/codex)
 
-*The plan that sounds finished usually isn't. In crucible's first real run, a deeply-researched, interview-locked plan still contained **one unbuildable subsystem and six designs that would have corrupted data** — a rival model found all of them before any code existed.*
+*The plan that sounds finished usually isn't. In claudex-loop's first real run, a deeply-researched, interview-locked plan still contained **one unbuildable subsystem and six designs that would have corrupted data** — a rival model found all of them before any code existed.*
 
 </div>
 
@@ -19,7 +21,7 @@
 
 AI-assisted coding fails in two places: the gap between **you and Claude** (do we agree on what to build?) and the gap between **Claude and its own output** (is the plan actually correct — and how would you even know?). The model that wrote the plan can't be trusted to grade it. That's an echo chamber.
 
-Crucible closes both gaps: Claude locks intent *with you*, then **OpenAI Codex** — a rival, cross-provider model — attacks the locked plan round after round until it can't find anything else wrong.
+Claudex-loop closes both gaps: Claude locks intent *with you*, then **OpenAI Codex** — a rival, cross-provider model — attacks the locked plan round after round until it can't find anything else wrong.
 
 ```mermaid
 flowchart LR
@@ -62,11 +64,13 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 ### Option A — Plugin *(recommended: updates flow automatically)*
 
 ```
-/plugin marketplace add chaseai-yt/crucible
-/plugin install crucible@crucible
+/plugin marketplace add cth9191/claudex-loop
+/plugin install claudex-loop@claudex-loop
 ```
 
-Skills arrive namespaced: `/crucible:crucible`, `/crucible:codex-review`, `/crucible:codex-build`. (Intent triggering works regardless — say "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:codex-review`, `/claudex-loop:codex-build`. (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+
+> **Installed back when this was `crucible`?** Your existing marketplace source keeps working (GitHub redirects), but the plugin name changed — re-add with the commands above to pick up the new namespace.
 
 ### Option B — Manual copy *(bare skill names)*
 
@@ -78,9 +82,9 @@ cp -r skills/* ~/.claude/skills/
 Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\
 ```
 
-Invoke as `/crucible`, `/codex-review`, `/codex-build`. Update by `git pull` + re-copy.
+Invoke as `/claudex-loop`, `/codex-review`, `/codex-build`. Update by `git pull` + re-copy.
 
-> **Coming from grill-me-codex?** This repo *was* grill-me-codex — GitHub redirects the old URL, so `git pull` in your existing clone just works. The old skills live on in [`legacy/`](./legacy/) (copy them only if you want them; `/crucible` doesn't need them).
+> **Coming from grill-me-codex or crucible?** This repo *was* both — GitHub redirects the old URLs, so `git pull` in your existing clone just works. The old grill skills live on in [`legacy/`](./legacy/) (copy them only if you want them; `/claudex-loop` doesn't need them).
 
 ## Prerequisites
 
@@ -92,7 +96,7 @@ Invoke as `/crucible`, `/codex-review`, `/codex-build`. Update by `git pull` + r
 
 | Skill | Var | Default | Meaning |
 |-------|-----|---------|---------|
-| `crucible` | `research` | ask | `none` / `web` / `deep` — pre-answers the Phase 0 research gate |
+| `claudex-loop` | `research` | ask | `none` / `web` / `deep` — pre-answers the Phase 0 research gate |
 | review skills | `MAX_ROUNDS` | `5` | Hard cap on review rounds |
 | review skills | `PLAN_FILE` | `PLAN.md` | Where the plan lives |
 | all | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | The argument transcript |
@@ -110,9 +114,9 @@ Pass e.g. `rounds=3` when invoking to override.
 
 ## Credits
 
-- The [`legacy/`](./legacy/) skills' Act 1 (`grill-me`, `grill-with-docs`) © [Matt Pocock](https://github.com/mattpocock/skills) (MIT) — see their `THIRD-PARTY-NOTICES.md`. Crucible's interview is an original redesign.
+- The [`legacy/`](./legacy/) skills' Act 1 (`grill-me`, `grill-with-docs`) © [Matt Pocock](https://github.com/mattpocock/skills) (MIT) — see their `THIRD-PARTY-NOTICES.md`. Claudex-loop's interview is an original redesign.
 - Phase 3's Codex-as-builder pattern adapted from Peter Steinberger's [`codex-first`](https://github.com/steipete/agent-scripts).
-- Crucible, the iterative cross-model review, and packaging by [Chase AI](https://youtube.com/@chaseai).
+- Claudex-loop, the iterative cross-model review, and packaging by [Chase AI](https://youtube.com/@chaseai).
 
 <div align="center">
 

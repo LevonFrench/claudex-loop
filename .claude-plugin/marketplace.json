@@ -1,14 +1,14 @@
 {
-  "name": "crucible",
+  "name": "claudex-loop",
   "owner": {
     "name": "Chase AI",
     "url": "https://youtube.com/@chaseai"
   },
   "plugins": [
     {
-      "name": "crucible",
+      "name": "claudex-loop",
       "source": "./",
-      "description": "Plan hardening: recon → interrogate → adversarial Codex review (→ cross-model build). Ships /crucible:crucible, /crucible:codex-review, /crucible:codex-build."
+      "description": "Plan hardening: recon → interrogate → adversarial Codex review (→ cross-model build). Ships /claudex-loop:claudex-loop, /claudex-loop:codex-review, /claudex-loop:codex-build."
     }
   ]
 }
