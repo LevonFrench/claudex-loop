@@ -6,7 +6,7 @@
 
 *(Formerly **crucible** — same skill, new name. GitHub redirects the old URLs.)*
 
-[![Stars](https://img.shields.io/github/stars/cth9191/claudex-loop?style=flat&color=e8590c)](https://github.com/cth9191/claudex-loop/stargazers)
+[![Stars](https://img.shields.io/github/stars/chaseai-yt/claudex-loop?style=flat&color=e8590c)](https://github.com/chaseai-yt/claudex-loop/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-skill%20%2B%20plugin-d97757)](https://docs.anthropic.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/OpenAI_Codex-adversarial_reviewer-10a37f)](https://github.com/openai/codex)
@@ -64,7 +64,7 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 ### Option A — Plugin *(recommended: updates flow automatically)*
 
 ```
-/plugin marketplace add cth9191/claudex-loop
+/plugin marketplace add chaseai-yt/claudex-loop
 /plugin install claudex-loop@claudex-loop
 ```
 
