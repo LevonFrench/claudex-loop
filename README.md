@@ -1,6 +1,15 @@
 <div align="center">
 
-# 🔁 claudex-loop
+```ansi
+[1;31m██████╗  ██╗       █████╗  ██╗   ██╗ ██████╗  ███████╗ ██╗  ██╗[0m  [1;32m██╗       ██████╗   ██████╗  ██████╗ [0m
+[1;31m██╔════╝ ██║      ██╔══██╗ ██║   ██║ ██╔══██╗ ██╔════╝ ╚██╗██╔╝[0m  [1;32m██║      ██╔═══██╗ ██╔═══██╗ ██╔══██╗[0m
+[1;31m██║      ██║      ███████║ ██║   ██║ ██║  ██║ █████╗    ╚███╔╝ [0m  [1;32m██║      ██║   ██║ ██║   ██║ ██████╔╝[0m
+[1;31m██║      ██║      ██╔══██║ ██║   ██║ ██║  ██║ ██╔══╝    ██╔██╗ [0m  [1;32m██║      ██║   ██║ ██║   ██║ ██╔═══╝ [0m
+[1;31m╚██████╗ ███████╗ ██║  ██║ ╚██████╔╝ ██████╔╝ ███████╗ ██╔╝ ██╗[0m  [1;32m███████╗ ╚██████╔╝ ╚██████╔╝ ██║     [0m
+[1;31m╚═════╝  ╚══════╝ ╚═╝  ╚═╝  ╚═════╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═╝[0m  [1;32m╚══════╝  ╚═════╝   ╚═════╝  ╚═╝     [0m
+
+[90m        two models · one argument · zero echo chamber[0m
+```
 
 ### Two AI models harden your plan before a line of code exists — then swap jobs to build it.
 
@@ -33,6 +42,14 @@ flowchart LR
     R -- same session --> C
     C -- APPROVED --> S["✍️ You sign off"]
     S -. optional .-> D["🔨 BUILD<br>Codex writes<br>Claude verifies"]
+    classDef claude fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef codex fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class A,B,R claude
+    class C,D codex
+    class L,S human
+    class P artifact
 ```
 
 **You enter at three points only:** confirming the ledger, answering the interview, signing off the converged plan. Codex is read-only throughout review and never touches a file.
@@ -52,6 +69,19 @@ Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the fu
 ## Receipts
 
 From the first end-to-end greenfield run (a solo-creator CRM):
+
+```ansi
+[90m$ [0m[1m/claudex-loop[0m[90m research=web[0m
+[36m● PHASE 0 — RECON[0m        assumptions ledger: batch-confirmed in one reply
+[36m● PHASE 1 — INTERROGATE[0m  decision map: load-bearing asked 1-by-1, cosmetic batched
+[36m● PHASE 2 — REVIEW[0m
+  ROUND 1 ▸ [33mVERDICT: REVISE[0m    26 findings
+  ROUND 2 ▸ [33mVERDICT: REVISE[0m    15 findings
+  ROUND 3 ▸ [33mVERDICT: REVISE[0m    12 findings
+  ROUND 4 ▸ [33mVERDICT: REVISE[0m     2 findings
+  ROUND 5 ▸ [1;32mVERDICT: APPROVED[0m   0 findings
+[1;32m✔[0m plan locked — [1mPLAN-REVIEW-LOG.md[0m holds the whole argument
+```
 
 - **55 findings across 5 rounds** — converging 26 → 15 → 12 → 2 → 0
 - **1 fatal:** an access-path architecture that could not be built as written (read as completely plausible)
