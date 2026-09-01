@@ -14,26 +14,17 @@ param(
     [ValidateRange(1, 2)]
     [int]$MaxFixRounds = 2,
 
-    [string]$CloseoutModel = 'claude-sonnet-5'
+    [string]$CloseoutModel = 'claude-sonnet-5',
+
+    [string]$CodexPath = '',
+
+    [string]$ClaudePath = ''
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-function Write-Utf8NoBomAtomic {
-    param([string]$Path, [string]$Content)
-
-    $parent = Split-Path -Parent $Path
-    [System.IO.Directory]::CreateDirectory($parent) | Out-Null
-    $temporary = Join-Path $parent ('.write-' + [guid]::NewGuid().ToString('N') + '.tmp')
-    $encoding = New-Object System.Text.UTF8Encoding($false)
-    try {
-        [System.IO.File]::WriteAllText($temporary, $Content, $encoding)
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
-    } finally {
-        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
-    }
-}
+. (Join-Path $PSScriptRoot 'loop-common.ps1')
 
 function Read-StatePhase {
     param([string]$Path)
@@ -71,20 +62,28 @@ function Invoke-GitText {
     return [pscustomobject]@{ ExitCode = $exitCode; Text = $text }
 }
 
-function Get-ToolVersion {
-    param([string]$Name)
-    $command = Get-Command $Name -All -ErrorAction SilentlyContinue | Where-Object { $_.CommandType -eq 'Application' -and $_.Source -match '\.(exe|com)$' } | Select-Object -First 1
-    if ($null -eq $command) { throw "Required CLI is not on PATH: $Name" }
+function Get-AgentAvailability {
+    <#
+    Initialization only reports adversary availability. Recon and interrogation are
+    author-only phases, so a missing adversary CLI is a warning here; each summon
+    wrapper still fails hard when the assigned agent cannot be resolved.
+    #>
+    param([string]$Name, [string]$ExplicitPath)
+
+    try {
+        $resolved = Resolve-AgentExecutable -Name $Name -ExplicitPath $ExplicitPath -Detailed
+    } catch {
+        return [pscustomobject]@{ Name = $Name; Available = $false; Version = ''; Source = ''; Message = $_.Exception.Message }
+    }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $versionOutput = @(& $command.Source --version 2>&1)
-        $exitCode = $LASTEXITCODE
+        $versionOutput = @(& $resolved.Path --version 2>&1)
     } finally {
         $ErrorActionPreference = $savedPreference
     }
-    if ($exitCode -ne 0) { throw "$Name --version failed with exit code $exitCode." }
-    return (($versionOutput | ForEach-Object { $_.ToString() }) -join ' ').Trim()
+    $version = (($versionOutput | ForEach-Object { $_.ToString() }) -join ' ').Trim()
+    return [pscustomobject]@{ Name = $Name; Available = $true; Version = $version; Source = $resolved.Source; Message = '' }
 }
 
 try {
@@ -99,8 +98,8 @@ try {
         exit 0
     }
 
-    $codexVersion = Get-ToolVersion -Name 'codex'
-    $claudeVersion = Get-ToolVersion -Name 'claude'
+    $codexAgent = Get-AgentAvailability -Name 'codex' -ExplicitPath $CodexPath
+    $claudeAgent = Get-AgentAvailability -Name 'claude' -ExplicitPath $ClaudePath
 
     [System.IO.Directory]::CreateDirectory($loop) | Out-Null
     Assert-NotReparsePoint -Path $loop
@@ -192,8 +191,15 @@ closeout_model: $CloseoutModel
     }
 
     Write-Output "Initialized $loop"
-    Write-Output "codex: $codexVersion"
-    Write-Output "claude: $claudeVersion"
+    foreach ($agent in @($codexAgent, $claudeAgent)) {
+        if ($agent.Available) {
+            Write-Output ("{0}: {1} [{2}]" -f $agent.Name, $agent.Version, $agent.Source)
+        } else {
+            [Console]::Error.WriteLine(("WARNING: {0} CLI unavailable. Author-only phases can proceed; every {0} summon will fail until this is fixed. {1}" -f $agent.Name, $agent.Message))
+        }
+    }
+    $policyDiagnostic = Get-ExecutionPolicyDiagnostic
+    if ($policyDiagnostic) { [Console]::Error.WriteLine("WARNING: $policyDiagnostic") }
     exit 0
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
