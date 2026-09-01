@@ -28,12 +28,16 @@ jobs:
           # The agent CLIs are absent on CI, so doctor's non-zero exit is expected.
           # What must hold is that it still emits a parsable report with the
           # platform-correct read-intent sandbox.
-          $report = (.\scripts\doctor.ps1 | Out-String) | ConvertFrom-Json
+          $doctorJson = .\scripts\doctor.ps1 | Out-String
+          $doctorExit = $LASTEXITCODE
+          if ($doctorExit -notin @(0, 25)) { throw "Doctor exited with unexpected status $doctorExit." }
+          $report = $doctorJson | ConvertFrom-Json
           if ($report.checks.review_sandbox.read_intent_codex_sandbox -ne 'workspace-write') {
             throw "Windows read-intent mapped to $($report.checks.review_sandbox.read_intent_codex_sandbox)."
           }
           if (-not $report.checks.powershell_5_1.ok) { throw 'CI did not run Windows PowerShell 5.1.' }
           Write-Output 'Doctor report validated.'
+          $global:LASTEXITCODE = 0
 
   peer-sessions-offline:
     runs-on: windows-latest
