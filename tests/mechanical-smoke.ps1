@@ -121,104 +121,11 @@ Assert-True -Condition ([IO.Path]::GetFullPath($tempRoot).StartsWith($expectedPr
 
 try {
     $mockBin = Join-Path $tempRoot 'mock bin'
-    [IO.Directory]::CreateDirectory($mockBin) | Out-Null
-    $mockSource = @'
-using System;
-using System.IO;
-using System.Reflection;
-using System.Text;
-using System.Threading;
-
-public static class MockCli {
-    static string Escape(string value) {
-        return value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
-    }
-
-    static string Payload(string mode) {
-        if (mode == "malformed") return "review finished without a terminator\n";
-        if (mode == "revise-major") return "[F1.1] major | PLAN.md#D1 | A major-only claim.\n  Scenario: input -> wrong result.\nVERDICT: REVISE\n";
-        if (mode == "revise-blocking") return "[F1.1] blocking | PLAN.md#D1 | A blocking claim.\n  Scenario: input -> wrong result.\nVERDICT: REVISE\n";
-        if (mode == "approve-major") return "[F1.1] major | PLAN.md#D1 | A surviving observation.\n  Scenario: input -> wrong result.\nVERDICT: APPROVE\n";
-        if (mode == "approve-pseudo") return "[F5] No blocking scenario survives in the replacement sections.\n\nVERDICT: APPROVE\n";
-        if (mode == "approve-bracket-word") return "[Format] note: the plan reads cleanly.\nVERDICT: APPROVE\n";
-        if (mode == "result-pass") return "build report\nRESULT: PASS\n";
-        return "review complete\nVERDICT: APPROVE\n\n";
-    }
-
-    static void Sabotage(string mode) {
-        if (mode == "mutate-core") {
-            File.AppendAllText(Path.Combine(".loop", "STATE.md"), "phase: done\n");
-            File.WriteAllText(Path.Combine(".loop", "rogue-note.md"), "unexpected addition\n");
-        } else if (mode == "mutate-evidence") {
-            File.WriteAllText(Path.Combine(".loop", "build", "evidence.diff"), "rewritten evidence\n");
-        } else if (mode == "append-inbox") {
-            File.AppendAllText(Path.Combine(".loop", "wiki-inbox.md"), "- durable note from closeout\n");
-        } else if (mode == "rewrite-inbox") {
-            File.WriteAllText(Path.Combine(".loop", "wiki-inbox.md"), "clobbered\n");
-        }
-    }
-
-    public static int Main(string[] args) {
-        string executable = Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location).ToLowerInvariant();
-        bool codex = executable.Contains("codex");
-        string argsFile = Environment.GetEnvironmentVariable("XLOOP_MOCK_ARGS_FILE");
-        if (!String.IsNullOrEmpty(argsFile) && Array.IndexOf(args, "--version") < 0 && Array.IndexOf(args, "--help") < 0) {
-            File.WriteAllText(argsFile, String.Join("\n", args), new UTF8Encoding(false));
-        }
-        if (Array.IndexOf(args, "--version") >= 0) { Console.WriteLine(codex ? "codex 9.9.9-mock" : "claude 9.9.9-mock"); return 0; }
-        if (Array.IndexOf(args, "--help") >= 0) {
-            if (codex) return 71;
-            Console.WriteLine("  -p, --print\n  --output-format");
-            return 0;
-        }
-
-        string mode = Environment.GetEnvironmentVariable("XLOOP_MOCK_MODE") ?? "approve";
-        bool resume = Array.IndexOf(args, "resume") >= 0 || Array.IndexOf(args, "--resume") >= 0;
-        if (mode == "resume-fail" && resume) return 9;
-        if (mode == "resume-mutated-fail" && resume) return 13;
-        if (mode == "resume-invalid" && resume) { Console.Error.WriteLine("session expired before turn"); return 9; }
-        if (mode == "resume-requires-fresh") {
-            if (resume) return 9;
-            string invocationPrompt = codex && args.Length > 0 ? args[args.Length - 1] : "";
-            if (!codex) {
-                int promptIndex = Array.IndexOf(args, "-p");
-                if (promptIndex >= 0 && promptIndex + 1 < args.Length) invocationPrompt = args[promptIndex + 1];
-            }
-            if (!invocationPrompt.Contains("FRESH PACKET")) return 12;
-        }
-        if (mode == "tool-fail") return 7;
-        if (mode == "timeout") { Thread.Sleep(5000); return 0; }
-        if (mode == "resume-malformed-envelope" && resume && !codex) { Console.Write("truncated-json"); return 0; }
-        Sabotage(mode);
-        string payload = Payload(mode);
-        string usage = mode == "usage"
-            ? "{\"input_tokens\":1200,\"output_tokens\":340,\"cached_input_tokens\":800}"
-            : null;
-
-        if (codex) {
-            string output = null;
-            for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "-o" || args[i] == "--output-last-message") output = args[i + 1];
-            if (String.IsNullOrEmpty(output)) return 8;
-            File.WriteAllText(output, (mode == "bom" ? "\ufeff" : "") + payload, new UTF8Encoding(false));
-            Console.WriteLine("{\"type\":\"thread.started\",\"thread_id\":\"mock-thread\"}");
-            if (usage != null) Console.WriteLine("{\"type\":\"turn.completed\",\"usage\":" + usage + "}");
-        } else {
-            string envelope = "{\"session_id\":\"mock-session\",\"is_error\":false,"
-                + (usage != null ? "\"usage\":" + usage + "," : "")
-                + "\"result\":\"" + Escape((mode == "bom" ? "\ufeff" : "") + payload) + "\"}";
-            Console.OutputEncoding = new UTF8Encoding(false);
-            Console.Write((mode == "bom" ? "\ufeff" : "") + envelope);
-        }
-        return 0;
-    }
-}
-'@
-    $compiled = Join-Path $mockBin 'mock-cli.exe'
-    Add-Type -TypeDefinition $mockSource -Language CSharp -OutputAssembly $compiled -OutputType ConsoleApplication
+    $mockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $mockBin)
+    Assert-True -Condition ($mockBuild.ExitCode -eq 0) -Message "Mock agent CLI build failed: $($mockBuild.Output)"
     $codexMock = Join-Path $mockBin 'codex.exe'
     $claudeMock = Join-Path $mockBin 'claude.exe'
-    Copy-Item -LiteralPath $compiled -Destination $codexMock
-    Copy-Item -LiteralPath $compiled -Destination $claudeMock
+    Assert-True -Condition ([IO.File]::Exists($codexMock) -and [IO.File]::Exists($claudeMock)) -Message 'Mock agent CLIs were not produced.'
 
     $savedPath = $env:PATH
     $env:PATH = $mockBin + [IO.Path]::PathSeparator + $env:PATH
@@ -584,14 +491,187 @@ public static class MockCli {
         Assert-True -Condition ($noProof.ExitCode -eq 0) -Message "interrogate-to-review failed: $($noProof.Output)"
         $approveWithoutProof = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-approve')
         Assert-True -Condition ($approveWithoutProof.ExitCode -eq 1) -Message 'Approval into build was allowed without a proof command.'
-        $withProof = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round', '-ProofCmd', 'powershell.exe -File .\tests\mechanical-smoke.ps1')
+        $withProof = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round', '-ToRound', '2', '-ProofCmd', 'powershell.exe -File .\tests\mechanical-smoke.ps1')
         Assert-True -Condition ($withProof.ExitCode -eq 0) -Message "review-next-round failed: $($withProof.Output)"
+
+        # An advancing transition declares the step it is advancing to, so a crash
+        # between a durable action and its checkpoint replays instead of advancing
+        # twice, and an undeclared advance is refused outright.
+        $undeclared = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round')
+        Assert-True -Condition ($undeclared.ExitCode -eq 1) -Message 'An undeclared round advance was accepted.'
+        $replay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round', '-ToRound', '2')
+        Assert-True -Condition ($replay.ExitCode -eq 0) -Message "Replaying an applied round advance failed: $($replay.Output)"
+        Assert-True -Condition ((($replay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying an applied round advance was not idempotent.'
+        Assert-True -Condition ([IO.File]::ReadAllText($stepStatePath) -match '(?m)^round: 2\s*$') -Message 'A replayed round advance moved the round again.'
+        $skipAhead = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round', '-ToRound', '4')
+        Assert-True -Condition ($skipAhead.ExitCode -eq 1) -Message 'A round advance skipped a round.'
         $badSha = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'refresh-lock', '-PinnedSha', 'not-a-sha')
         Assert-True -Condition ($badSha.ExitCode -eq 1) -Message 'A malformed SHA was accepted into state.'
         $stepStateText = [IO.File]::ReadAllText($stepStatePath)
         Assert-True -Condition ($stepStateText -match '(?m)^round: 2\s*$') -Message 'Round was not advanced in place.'
         Assert-True -Condition ($stepStateText -match '(?m)^loop: warn-smoke\s*$') -Message 'Unrelated state lines were reflowed.'
         Assert-True -Condition ($stepStateText -notmatch 'not-a-sha') -Message 'A rejected value still reached STATE.md.'
+
+        # Nudge budgets are durable, one per class per step, and are spent in STATE
+        # before the retry is summoned so a cleared session cannot refund them.
+        $nudgeState = [IO.File]::ReadAllText($stepStatePath)
+        Assert-True -Condition ($nudgeState -match '(?m)^format_nudged:\s*$') -Message 'Initialization did not scaffold a durable format nudge counter.'
+        Assert-True -Condition ($nudgeState -match '(?m)^mutation_nudged:\s*$') -Message 'Initialization did not scaffold a durable mutation nudge counter.'
+        $firstNudge = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'record-nudge', '-NudgeClass', 'format')
+        Assert-True -Condition ($firstNudge.ExitCode -eq 0) -Message "The first format nudge was refused: $($firstNudge.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($stepStatePath) -match '(?m)^format_nudged: 1\s*$') -Message 'A spent format nudge was not recorded durably.'
+        $nudgeReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'record-nudge', '-NudgeClass', 'format')
+        Assert-True -Condition ($nudgeReplay.ExitCode -eq 0 -and (($nudgeReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying a recorded nudge was not idempotent.'
+        $overBudget = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'record-nudge', '-NudgeClass', 'format', '-Attempt', '2')
+        Assert-True -Condition ($overBudget.ExitCode -eq 1) -Message 'A second format nudge was granted beyond the budget.'
+        $otherClass = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'record-nudge', '-NudgeClass', 'mutation')
+        Assert-True -Condition ($otherClass.ExitCode -eq 0) -Message "The independent mutation budget was consumed by a format nudge: $($otherClass.Output)"
+        $lockRefresh = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'refresh-lock')
+        Assert-True -Condition ($lockRefresh.ExitCode -eq 0) -Message "refresh-lock failed: $($lockRefresh.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($stepStatePath) -match '(?m)^format_nudged: 1\s*$') -Message 'Refreshing the lock refunded a spent nudge.'
+        $nextStep = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $stepProject, '-Transition', 'review-next-round', '-ToRound', '3')
+        Assert-True -Condition ($nextStep.ExitCode -eq 0) -Message "review-next-round to round 3 failed: $($nextStep.Output)"
+        $advancedState = [IO.File]::ReadAllText($stepStatePath)
+        Assert-True -Condition ($advancedState -match '(?m)^format_nudged:\s*$' -and $advancedState -match '(?m)^mutation_nudged:\s*$') -Message 'A new step did not start with fresh nudge budgets.'
+        $nudgeStatus = Invoke-ChildPowerShell -Script (Join-Path $repo 'skills\xloop\scripts\loop-status.ps1') -Arguments @('-Project', $stepProject, '-AsJson')
+        Assert-True -Condition ($nudgeStatus.ExitCode -eq 0) -Message "loop-status.ps1 rejected nudge-bearing state: $($nudgeStatus.Output)"
+        Assert-True -Condition ((($nudgeStatus.Output | ConvertFrom-Json).format_nudge_left) -eq 1) -Message 'Status did not report the remaining nudge budget.'
+
+        # Pinning is one atomic write: the prerequisite is evaluated against the
+        # value this call is recording, not the value it happened to find.
+        $pinProject = Join-Path $tempRoot 'pin project'
+        [IO.Directory]::CreateDirectory($pinProject) | Out-Null
+        $pinInit = Invoke-ChildCommand -Command ($isolateClaudeOnly + "& '$initScript' -Project '$pinProject' -Author 'claude' -LoopName 'pin-smoke'; exit `$LASTEXITCODE")
+        Assert-True -Condition ($pinInit.ExitCode -eq 0) -Message "Pin-project initialization failed: $($pinInit.Output)"
+        $pinStatePath = Join-Path $pinProject '.loop\STATE.md'
+        $pinStateText = [IO.File]::ReadAllText($pinStatePath)
+        $pinStateText = $pinStateText -replace '(?m)^phase: recon$', 'phase: build' -replace '(?m)^build_round: 0$', 'build_round: 1' -replace '(?m)^build_step:$', 'build_step: summon'
+        [IO.File]::WriteAllText($pinStatePath, $pinStateText, (New-Object Text.UTF8Encoding($false)))
+        $pinStep = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-pin')
+        Assert-True -Condition ($pinStep.ExitCode -eq 0) -Message "build-pin failed: $($pinStep.Output)"
+        $atomicPin = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-inspect', '-PinnedSha', '8d1e4409f0b1a2c3d4e5f60718293a4b5c6d7e8f')
+        Assert-True -Condition ($atomicPin.ExitCode -eq 0) -Message "Recording a pin and advancing to inspection was not atomic: $($atomicPin.Output)"
+        $pinnedState = [IO.File]::ReadAllText($pinStatePath)
+        Assert-True -Condition ($pinnedState -match '(?m)^pinned_sha: 8d1e4409f0b1a2c3d4e5f60718293a4b5c6d7e8f\s*$') -Message 'The pin was not recorded with the transition.'
+        Assert-True -Condition ($pinnedState -match '(?m)^build_step: inspect\s*$') -Message 'The pin transition did not advance the build step.'
+        $fixUndeclared = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-fix')
+        Assert-True -Condition ($fixUndeclared.ExitCode -eq 1) -Message 'An undeclared fix-round advance was accepted.'
+        $fixRound = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-fix', '-ToBuildRound', '2')
+        Assert-True -Condition ($fixRound.ExitCode -eq 0) -Message "build-fix failed: $($fixRound.Output)"
+        $fixReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-fix', '-ToBuildRound', '2')
+        Assert-True -Condition ((($fixReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying a fix-round advance incremented build_round again.'
+
+        # The packet decides which terminator is legal, and a findings file with a
+        # malformed finding header cannot carry a verdict at all.
+        $terminatorCases = @(
+            @{ Mode = 'result-pass'; Out = '.loop\rounds\r7-findings.md'; Expected = 2; Why = 'a review packet accepted a build RESULT terminator' },
+            @{ Mode = 'bom'; Out = '.loop\build\b7-report.md'; Expected = 2; Why = 'a build report accepted a review VERDICT terminator' },
+            @{ Mode = 'revise-pseudo'; Out = '.loop\rounds\r8-findings.md'; Expected = 2; Why = 'a REVISE with a bare pseudo-finding was accepted' },
+            @{ Mode = 'revise-blocking'; Out = '.loop\rounds\r9-findings.md'; Expected = 0; Why = 'a well-formed REVISE was rejected' },
+            @{ Mode = 'result-pass'; Out = '.loop\build\b8-report.md'; Expected = 0; Why = 'a well-formed build report was rejected' }
+        )
+        foreach ($case in $terminatorCases) {
+            $env:XLOOP_MOCK_MODE = $case.Mode
+            $run = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $case.Out, '-TimeoutSec', '5')
+            Assert-True -Condition ($run.ExitCode -eq $case.Expected) -Message "$($case.Why): exit $($run.ExitCode) for $($case.Out)."
+        }
+        $explicitExpect = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\explicit-expect.md', '-Expect', 'verdict', '-TimeoutSec', '5')
+        Assert-True -Condition ($explicitExpect.ExitCode -eq 2) -Message 'An explicitly declared verdict packet accepted a RESULT terminator.'
+
+        # Missing packet evidence fails the summon instead of quietly running the
+        # model without the evidence it was meant to weigh.
+        $env:XLOOP_MOCK_MODE = 'bom'
+        $missingEvidence = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\missing-evidence.md', '-EvidenceFile', '.loop\build\typo-b1.diff', '-TimeoutSec', '5')
+        Assert-True -Condition ($missingEvidence.ExitCode -eq 1) -Message 'A summon ran with an unresolvable evidence path.'
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $project '.loop\build\missing-evidence.md'))) -Message 'A summon with missing evidence still produced output.'
+
+        # Multi-file evidence survives the `powershell -File` boundary as a list file.
+        $evidenceTwo = Join-Path $project '.loop\build\evidence-two.diff'
+        $evidenceTwoText = "second stat header`nsecond diff`n"
+        [IO.File]::WriteAllText($evidencePath, $evidenceText, (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($evidenceTwo, $evidenceTwoText, (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $project '.loop\tmp\evidence-list.txt'), "# pinned inspection evidence`r`n.loop\build\evidence.diff`r`n.loop\build\evidence-two.diff`r`n", (New-Object Text.UTF8Encoding($false)))
+        $env:XLOOP_MOCK_MODE = 'mutate-evidence'
+        $listRun = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\list-evidence.md', '-EvidenceListFile', '.loop\tmp\evidence-list.txt', '-TimeoutSec', '5')
+        Assert-True -Condition ($listRun.ExitCode -eq 2) -Message "A mutated listed evidence file did not return exit 2: $($listRun.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($evidencePath) -ceq $evidenceText) -Message 'The first listed evidence file was not restored.'
+        Assert-True -Condition ([IO.File]::ReadAllText($evidenceTwo) -ceq $evidenceTwoText) -Message 'The second listed evidence file was not protected.'
+
+        # A mutable declaration can never weaken a stronger protection class.
+        $downgrade = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\downgrade.md', '-AppendOnlyFile', '.loop\STATE.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($downgrade.ExitCode -eq 1) -Message 'STATE.md was accepted as an append-only path.'
+        $restoredState = [IO.File]::ReadAllBytes($statePath)
+        Assert-True -Condition (@(Compare-Object $statePathBytes $restoredState -SyncWindow 0).Count -eq 0) -Message 'The refused downgrade still touched STATE.md.'
+        $ledgerConflict = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\ledger-conflict.md', '-AppendOnlyFile', '.loop\LEDGER.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($ledgerConflict.ExitCode -eq 1) -Message 'The usage ledger was accepted as an agent-writable append-only path.'
+
+        # The ledger is wrapper-owned: an agent rewriting it is restored and nudged.
+        $ledgerBytes = [IO.File]::ReadAllBytes($ledgerPath)
+        $env:XLOOP_MOCK_MODE = 'rewrite-ledger'
+        $ledgerRun = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\ledger-rewrite.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($ledgerRun.ExitCode -eq 2) -Message "A rewritten usage ledger was accepted: $($ledgerRun.Output)"
+        Assert-True -Condition (@(Compare-Object $ledgerBytes ([IO.File]::ReadAllBytes($ledgerPath)) -SyncWindow 0).Count -eq 0) -Message 'A rewritten usage ledger was not restored.'
+
+        # The guard inventories more than files, and only the wrapper's own named
+        # sidecars are internal: a look-alike sidecar is still quarantined.
+        $strayOutput = '.loop\rounds\stray-host.md'
+        $env:XLOOP_MOCK_STRAY_FILE = Join-Path $project ($strayOutput + '.payload')
+        $env:XLOOP_MOCK_STRAY_DIR = Join-Path $project '.loop\rounds\rogue tree'
+        try {
+            $env:XLOOP_MOCK_MODE = 'bom'
+            $strayRun = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $strayOutput, '-TimeoutSec', '5')
+            Assert-True -Condition ($strayRun.ExitCode -eq 2) -Message "Durable untrusted additions did not return exit 2: $($strayRun.Output)"
+            Assert-True -Condition (-not (Test-Path -LiteralPath $env:XLOOP_MOCK_STRAY_FILE)) -Message 'A sidecar-shaped payload was treated as an internal wrapper file.'
+            Assert-True -Condition (-not (Test-Path -LiteralPath $env:XLOOP_MOCK_STRAY_DIR)) -Message 'A new directory under .loop was left in place.'
+            $strayMeta = [IO.File]::ReadAllText((Join-Path $project ($strayOutput + '.meta.json'))) | ConvertFrom-Json
+            $strayKinds = @($strayMeta.mutations | ForEach-Object { $_.kind })
+            Assert-True -Condition ($strayKinds -contains 'unexpected-addition') -Message 'The stray payload was not reported.'
+            Assert-True -Condition ($strayKinds -contains 'unexpected-directory') -Message 'The stray directory was not reported.'
+            Assert-True -Condition (Test-Path -LiteralPath (Join-Path $project ($strayOutput + '.meta.json'))) -Message 'The wrapper quarantined its own metadata sidecar.'
+        } finally {
+            Remove-Item Env:XLOOP_MOCK_STRAY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_STRAY_DIR -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath (Join-Path $project '.loop\tmp\quarantine') -Recurse -Force
+
+        # A mutation during a failed resume is restored before the fresh fallback
+        # reads the packet, not only after the whole loop finishes.
+        $env:XLOOP_MOCK_MODE = 'mutate-resume-fresh'
+        $resumeMutation = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-FreshPromptFile', '.loop\tmp\fresh packet.txt', '-OutFile', '.loop\rounds\resume-mutation.md', '-ResumeThread', 'mutating-thread', '-TimeoutSec', '5')
+        Assert-True -Condition ($resumeMutation.ExitCode -eq 2) -Message "A resumed mutation was not reported: $($resumeMutation.Output)"
+        $resumeMutationMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\rounds\resume-mutation.md.meta.json')) | ConvertFrom-Json
+        Assert-True -Condition ($resumeMutationMeta.attempts.Count -eq 2) -Message 'The fresh fallback did not run after the mutating resume.'
+        Assert-True -Condition (@(Compare-Object $statePathBytes ([IO.File]::ReadAllBytes($statePath)) -SyncWindow 0).Count -eq 0) -Message 'A mutation during a failed resume survived into the fresh attempt.'
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $project '.loop\rogue-note.md'))) -Message 'A resumed unexpected addition was left in place.'
+        Remove-Item -LiteralPath (Join-Path $project '.loop\tmp\quarantine') -Recurse -Force
+
+        # Discovery is canonical and bounded: a relative override resolves to the
+        # executable that was probed, and a hanging probe cannot outlive its bound.
+        $relativeResolve = Invoke-ChildCommand -Command ("Set-Location -LiteralPath '$mockBin'; . '$common'; (Resolve-AgentExecutable -Name 'codex' -ExplicitPath 'codex.exe' -Detailed).Path")
+        Assert-True -Condition ($relativeResolve.Output -ceq $codexMock) -Message "A relative override did not resolve to a canonical absolute path: $($relativeResolve.Output)"
+        $hangProbe = Invoke-ChildCommand -Command ("`$env:XLOOP_MOCK_HANG_VERSION='1'; . '$common'; `$start=[datetime]::UtcNow; `$ok=Test-AgentExecutable -Path '$codexMock' -TimeoutSeconds 2; Write-Output `$ok; Write-Output ([int](([datetime]::UtcNow - `$start).TotalSeconds))")
+        $hangParts = @($hangProbe.Output -split "`n")
+        Assert-True -Condition ($hangParts[0].Trim() -eq 'False') -Message "A hanging --version probe was accepted: $($hangProbe.Output)"
+        Assert-True -Condition ([int]$hangParts[1].Trim() -lt 30) -Message "A hanging --version probe was not bounded: $($hangProbe.Output)"
+
+        # Visibility: watchable when a real console is attached or explicitly asked
+        # for, never when a driver or CI is capturing the run.
+        $visiblePreference = Invoke-ChildCommand -Command (". '$common'; Write-Output (Get-LoopVisiblePreference); Write-Output (Get-LoopVisiblePreference -Visible); `$env:XLOOP_HEADLESS='1'; Write-Output (Get-LoopVisiblePreference -Visible); `$env:XLOOP_HEADLESS=''; Write-Output (Get-LoopVisiblePreference -Visible -Headless); `$env:XLOOP_VISIBLE='1'; Write-Output (Get-LoopVisiblePreference)")
+        Assert-True -Condition ((($visiblePreference.Output -split "`n") | ForEach-Object { $_.Trim() }) -join ',' -ceq 'False,True,False,False,True') -Message "Visible-summon preference is wrong: $($visiblePreference.Output)"
+
+        # A real watchable summon: the transcript still reaches the wrapper, the
+        # handoff files are wrapper-internal rather than quarantined additions, and
+        # nothing private is left behind under .loop.
+        if ($env:XLOOP_HEADLESS -ne '1') {
+            $env:XLOOP_MOCK_MODE = 'bom'
+            $visibleRun = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\r6-findings.md', '-Visible', '-TimeoutSec', '60')
+            Assert-True -Condition ($visibleRun.ExitCode -eq 0) -Message "A watchable summon did not return exit 0: $($visibleRun.Output)"
+            $visibleMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\rounds\r6-findings.md.meta.json')) | ConvertFrom-Json
+            Assert-True -Condition ([bool]$visibleMeta.attempts[0].visible) -Message 'The visible summon silently ran headless.'
+            Assert-True -Condition (@($visibleMeta.mutations).Count -eq 0) -Message 'The visible handoff was reported as a packet violation.'
+            Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $project '.loop\rounds\r6-findings.md')) -match 'VERDICT: APPROVE') -Message 'The visible summon lost its transcript.'
+            Assert-True -Condition (@(Get-ChildItem -LiteralPath (Join-Path $project '.loop\tmp') -Filter 'visible-*' -Force -Recurse -ErrorAction SilentlyContinue).Count -eq 0) -Message 'The visible summon left private handoff material under .loop.'
+        }
 
         $env:XLOOP_MOCK_MODE = 'timeout'
         $timeout = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\timeout.md', '-TimeoutSec', '1')

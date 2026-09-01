@@ -69,6 +69,52 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_step" \
   -Project "$win_project" -Transition 'recon-to-interrogate' >/dev/null
 grep -Eq '^phase: interrogate$' "$project/.loop/STATE.md"
 
+# A summon must be startable from Git Bash, including a multi-file evidence packet
+# that cannot be expressed as an array across the `powershell -File` boundary.
+mock_exe_dir="$tmp_root/mock exe"
+win_mock_dir="$(cygpath -w "$mock_exe_dir")"
+win_mock_builder="$(cygpath -w "$repo_root/tests/new-mock-cli.ps1")"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_mock_builder" -OutputDirectory "$win_mock_dir" >/dev/null
+codex_exe="$win_mock_dir\\codex.exe"
+[[ -f "$mock_exe_dir/codex.exe" ]]
+
+summon_project="$tmp_root/summon from bash"
+mkdir -p -- "$summon_project/.loop/tmp" "$summon_project/.loop/build" "$summon_project/wiki/references"
+printf 'plan text\n' >"$summon_project/.loop/PLAN.md"
+printf 'stat header\ndiff --git a/x b/x\n' >"$summon_project/.loop/build/evidence.diff"
+printf 'second stat header\n' >"$summon_project/.loop/build/evidence-two.diff"
+printf 'builder report\nRESULT: PASS\n' >"$summon_project/.loop/build/b1-report.md"
+printf '# brief\n' >"$summon_project/wiki/references/codebase-brief.md"
+printf 'read the inspection packet\n' >"$summon_project/.loop/tmp/p.txt"
+printf '# inspection evidence\n.loop/PLAN.md\n.loop/build/evidence.diff\n.loop/build/evidence-two.diff\n.loop/build/b1-report.md\nwiki/references/codebase-brief.md\n' >"$summon_project/.loop/tmp/evidence.txt"
+
+win_summon_project="$(cygpath -w "$summon_project")"
+win_codex_wrapper="$(cygpath -w "$repo_root/skills/xloop/scripts/loop-codex.ps1")"
+
+export XLOOP_MOCK_MODE='mutate-evidence'
+mutation_status=0
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_codex_wrapper" \
+  -Project "$win_summon_project" -PromptFile '.loop\tmp\p.txt' -OutFile '.loop\build\b1-inspect.md' \
+  -EvidenceListFile '.loop\tmp\evidence.txt' -CodexPath "$codex_exe" -TimeoutSec 60 >/dev/null || mutation_status=$?
+[[ "$mutation_status" -eq 2 ]] || { printf 'Mutated listed evidence returned %s, expected 2\n' "$mutation_status" >&2; exit 1; }
+grep -Fq 'stat header' "$summon_project/.loop/build/evidence.diff"
+grep -Fq 'second stat header' "$summon_project/.loop/build/evidence-two.diff"
+
+export XLOOP_MOCK_MODE='bom'
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_codex_wrapper" \
+  -Project "$win_summon_project" -PromptFile '.loop\tmp\p.txt' -OutFile '.loop\build\b1-inspect.md' \
+  -EvidenceListFile '.loop\tmp\evidence.txt' -CodexPath "$codex_exe" -TimeoutSec 60 >/dev/null
+grep -Fq 'VERDICT: APPROVE' "$summon_project/.loop/build/b1-inspect.md"
+
+missing_status=0
+printf '.loop/build/typo.diff\n' >"$summon_project/.loop/tmp/missing.txt"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_codex_wrapper" \
+  -Project "$win_summon_project" -PromptFile '.loop\tmp\p.txt' -OutFile '.loop\build\missing.md' \
+  -EvidenceListFile '.loop\tmp\missing.txt' -CodexPath "$codex_exe" -TimeoutSec 60 >/dev/null 2>&1 || missing_status=$?
+[[ "$missing_status" -eq 1 ]] || { printf 'Missing evidence returned %s, expected 1\n' "$missing_status" >&2; exit 1; }
+[[ ! -f "$summon_project/.loop/build/missing.md" ]]
+unset XLOOP_MOCK_MODE
+
 ps_test="$(cygpath -w "$repo_root/tests/mechanical-smoke.ps1")"
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$ps_test" >/dev/null
 
