@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: PowerShell 5.1 packaging and wrapper smoke
         shell: powershell
         run: .\tests\mechanical-smoke.ps1
