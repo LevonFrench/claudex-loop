@@ -11,11 +11,17 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'skills\xloop\scripts\loop-common.ps1')
+
 function Get-Application {
-    param([string]$Command, [string]$Label)
-    $resolved = Get-Command -Name $Command -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $resolved) { throw "$Label CLI is not available on PATH: $Command" }
-    return $resolved.Source
+    param([string]$Command, [string]$Label, [string]$Name)
+    # A bare agent name uses the full resolver chain; anything else is an explicit override.
+    $explicit = if ($Command -eq $Name) { '' } else { $Command }
+    try {
+        return (Resolve-AgentExecutable -Name $Name -ExplicitPath $explicit)
+    } catch {
+        throw "$Label CLI is not available: $Command. $($_.Exception.Message)"
+    }
 }
 
 function Assert-ClaudePrintMode {
@@ -128,9 +134,11 @@ $promptSource = Join-Path $repoRoot 'codex\prompts'
 Assert-NoReparsePoints -Path $skillSource -Label 'xloop source skill'
 Assert-NoReparsePoints -Path $promptSource -Label 'Codex prompt source'
 
-$codexExecutable = Get-Application -Command $CodexCommand -Label 'Codex'
-$claudeExecutable = Get-Application -Command $ClaudeCommand -Label 'Claude'
+$codexExecutable = Get-Application -Command $CodexCommand -Label 'Codex' -Name 'codex'
+$claudeExecutable = Get-Application -Command $ClaudeCommand -Label 'Claude' -Name 'claude'
 Assert-ClaudePrintMode -Executable $claudeExecutable
+$policyDiagnostic = Get-ExecutionPolicyDiagnostic
+if ($policyDiagnostic) { [Console]::Error.WriteLine("WARNING: $policyDiagnostic") }
 $expectedSkillManifest = Get-TreeManifest -Path $skillSource
 
 Install-SkillCopy -Source $skillSource -DestinationRoot $ClaudeSkillHome -ExpectedManifest $expectedSkillManifest
