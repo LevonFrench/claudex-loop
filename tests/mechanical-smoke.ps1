@@ -312,3 +312,4 @@ public static class MockCli {
 }
 
 Write-Output 'Offline PowerShell 5.1 smoke tests passed.'
+exit 0
