@@ -14,6 +14,17 @@
 - [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`.
 - [ ] Run the skill validator and `git diff --check`.
 
+## Peer Sessions plugin
+
+- [ ] Run `npm test`, `npm run test:tree`, `npm run smoke:claude-isolation`, `npm run smoke:codex-isolation`, `npm run validate`, and `npm run pack` from `plugins/peer-sessions`.
+- [ ] Validate the Codex plugin directory and the Claude Desktop MCPB manifest.
+- [ ] Run the concurrent visible smoke and same-process persistence smoke on Windows.
+- [ ] Close both viewers, reopen them with `peer_view`, and confirm provider PIDs and conversation identities remain unchanged.
+- [ ] Confirm the Codex app-server reports `ephemeral: true`, the smoke does not add a Codex Recent, and cleanup removes every private Codex home.
+- [ ] Inspect the final MCPB inventory and SHA-256; confirm it contains no development files, local paths, credentials, handles, PIDs, or transcripts.
+- [ ] Record all ten gates in `plugins/peer-sessions/ACCEPTANCE.md`.
+- [ ] Confirm documentation does not claim the standalone plugin closes XLoop finding B1.7.
+
 ## Authenticated acceptance
 
 Each gate below is classified. A **blocking** gate must pass before a stable tag; an **advisory** gate is recorded but does not hold the tag.

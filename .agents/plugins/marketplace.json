@@ -1,0 +1,20 @@
+{
+  "name": "claudex-loop",
+  "interface": {
+    "displayName": "Claudex Loop"
+  },
+  "plugins": [
+    {
+      "name": "peer-sessions",
+      "source": {
+        "source": "local",
+        "path": "./plugins/peer-sessions"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

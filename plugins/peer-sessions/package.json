@@ -1,0 +1,25 @@
+{
+  "name": "@claudex-loop/peer-sessions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows-local concurrent session broker for Claude and Codex MCP clients.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:tree": "node scripts/process-tree-smoke.mjs",
+    "validate": "node scripts/validate.mjs",
+    "pack": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-mcpb.ps1",
+    "start": "node server/daemon.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "smoke:live": "node scripts/smoke-acceptance.mjs",
+    "smoke:persistence": "node scripts/smoke-acceptance.mjs",
+    "smoke:acceptance": "node scripts/smoke-acceptance.mjs",
+    "smoke:codex-isolation": "node scripts/codex-isolation-smoke.mjs",
+    "smoke:claude-isolation": "node scripts/claude-hook-isolation-smoke.mjs",
+    "cleanup:smoke-threads": "node scripts/cleanup-smoke-threads.mjs",
+    "peer": "node scripts/peer-cli.mjs"
+  }
+}

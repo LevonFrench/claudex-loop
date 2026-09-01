@@ -14,6 +14,7 @@ This repository is a tuned fork of [chaseai-yt/claudex-loop](https://github.com/
 - BOM-tolerant state, strict terminators, fixed retry caps, lock warnings, and explicit exit codes make failures visible.
 - Summoned agents cannot quietly rewrite durable loop inputs: wrappers snapshot the immutable core and packet evidence, restore any change, quarantine stray files, and still preserve declared append-only closeout work.
 - Agent discovery survives shim-based and desktop installs, and a missing adversary warns at initialization instead of blocking author-only phases.
+- The optional `peer-sessions` plugin exposes one shared local MCP broker for multiple concurrent, named, visible Claude and Codex CLI sessions.
 - Clerical work has its own bounded helpers, so the driver renders packets and advances state without hand-editing files.
 - No writes to `AGENTS.md`, `CLAUDE.md`, tracked `.gitignore`, or global Git configuration.
 
@@ -36,6 +37,7 @@ Release status and operator gates are documented in [`docs/RELEASE-NOTES.md`](do
 - Windows 11 with Windows PowerShell 5.1 and Git Bash
 - `git`, `codex`, and `claude` on `PATH`
 - Authenticated Codex and Claude CLIs for live loops
+- Node.js 20 or newer for the optional Peer Sessions MCP server
 
 Run the environment check:
 
@@ -64,6 +66,17 @@ The installers make SHA-256-verified plain copies—no symlinks—to:
 - `~/.codex/prompts/xloop.md`
 
 Existing destinations are preserved unless `-Force` / `--force` is supplied; forced installs move the prior copy to a timestamped backup.
+
+The XLoop installers do not silently change plugin-manager configuration. To add the optional Peer Sessions plugin from the public marketplace:
+
+```powershell
+codex plugin marketplace add LevonFrench/claudex-loop
+codex plugin add peer-sessions@claudex-loop
+claude plugin marketplace add LevonFrench/claudex-loop
+claude plugin install peer-sessions@claudex-loop-custom
+```
+
+Restart the desktop app or open a new CLI session after installation. Regular Claude Desktop users can instead install the release asset `peer-sessions-0.1.0.mcpb`.
 
 ## Use
 
@@ -104,6 +117,20 @@ The locked v1 choices are:
 - Review cap: 5 rounds; fix cap: 2 rounds
 
 The Codex builder flag removes Codex approval and sandbox protections. XLoop only uses it after plan approval, a clean-tree and baseline gate, and an explicit role flip; run live builds only in repositories whose Git state you are prepared to recover.
+
+## Peer Sessions
+
+Peer Sessions is the direct live-session layer. One per-user broker owns up to 32 Claude or Codex provider processes and inherits the MCP host's Windows token, so run the desktop and CLI clients unelevated. Every peer has an exact name, an opaque routing handle, its own bounded turn queue, and a memory-only output ring. Turns are ordered within one peer while different peers run concurrently. Visible viewers open by default; closing a viewer leaves the provider alive, and `peer_view` reopens it. Claude peers ignore project hooks/settings/customizations, while Codex peers use an isolated configuration with zero inherited MCP servers and an ephemeral thread that does not enter Codex Recents.
+
+After installing the plugin, ask Claude or Codex naturally:
+
+```text
+Start visible read-access peers named claude:planner and codex:reviewer in this repository. Ask each for an independent assessment, then show me both responses.
+```
+
+The model uses `peer_launch`, `peer_resolve`, `peer_request`, `peer_read`, and `peer_view` behind the scenes. Write access uses the separate destructive `peer_launch_write` tool and must be approved explicitly. On Windows, Codex's literal read-only sandbox may be unable to launch a shell, so a read-access Codex peer can converse about supplied context but may not be able to inspect the repository. See [`plugins/peer-sessions/SCOPE.md`](plugins/peer-sessions/SCOPE.md) and [`plugins/peer-sessions/README.md`](plugins/peer-sessions/README.md).
+
+Peer Sessions is not XLoop's authoritative artifact transport. XLoop continues to rely on guarded `.loop/` packets until a separately specified integration preserves its mutation guards, validation, and exit codes.
 
 ## Validate
 

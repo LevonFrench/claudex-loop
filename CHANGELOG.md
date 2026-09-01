@@ -6,6 +6,10 @@ All notable changes to this custom fork are documented here.
 
 ### Added
 
+- `peer-sessions` v0.1, an optional Windows-local MCP broker shared by Codex and Claude clients. It supports up to 32 concurrent named provider sessions, per-session serialization, cross-session concurrency, bounded memory-only output, visible detachable viewers, opaque routing handles, and fixed read/write access mappings enforced at the broker boundary.
+- Codex, Claude Code, and Claude Desktop packaging for Peer Sessions, including Codex and Claude plugin manifests, a Claude Desktop MCPB, an offline protocol suite, Windows process-tree smoke, live concurrent/persistence smoke scripts, and recorded acceptance evidence.
+- Peer Sessions isolation gates for scrubbed executable probes, disabled Claude hooks/settings, zero inherited Codex MCP servers, ephemeral Codex threads, verified runtime ACL replacement, acknowledged viewer lifecycle, and fail-closed launch cleanup.
+
 - A validated agent resolver used by the wrappers, initializer, installer, and doctor: explicit override, native PATH application, npm vendored executable, then the newest desktop-app executable, each confirmed with `--version`. A `.cmd` shim on `PATH` no longer hides a working install.
 - A packet mutation policy enforced by both wrappers in every phase: an always-immutable core plus declared packet evidence is snapshotted and restored, unexpected `.loop` additions are quarantined, and declared append-only paths such as the wiki inbox may grow but never lose their prefix.
 - Independent one-use nudge budgets for malformed output and restored mutations, reported as `nudge_class` in wrapper metadata and spent durably in `STATE.md` (`format_nudged`, `mutation_nudged`, `max_nudges`) so a cleared session cannot refund a retry.

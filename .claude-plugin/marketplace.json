@@ -1,5 +1,6 @@
 {
   "name": "claudex-loop-custom",
+  "description": "Windows-native XLoop orchestration and optional persistent Claude-Codex peer sessions.",
   "owner": {
     "name": "LevonFrench",
     "url": "https://github.com/LevonFrench"
@@ -9,6 +10,11 @@
       "name": "claudex-loop-custom",
       "source": "./",
       "description": "Wiki-first Claude-Codex loop with durable project state and Windows-native wrappers. Ships /claudex-loop-custom:xloop."
+    },
+    {
+      "name": "peer-sessions",
+      "source": "./plugins/peer-sessions",
+      "description": "Windows-local MCP broker for multiple concurrent named Claude and Codex sessions."
     }
   ]
 }

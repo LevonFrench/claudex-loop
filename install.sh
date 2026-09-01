@@ -115,3 +115,7 @@ install_skill_copy "$claude_skill_home" "$expected_manifest"
 install_skill_copy "$codex_skill_home" "$expected_manifest"
 install_prompt_copies "$codex_prompt_home"
 printf 'Codex CLI: %s\nClaude CLI: %s\n' "$codex_path" "$claude_path"
+printf '\n%s\n' 'XLoop skill installation is complete. The optional Peer Sessions MCP plugin is installed separately.'
+printf 'Local marketplace source: %s\n' "$repo_root"
+printf '%s\n' 'Codex: codex plugin marketplace add <source>; codex plugin add peer-sessions@claudex-loop'
+printf '%s\n' 'Claude: claude plugin marketplace add <source>; claude plugin install peer-sessions@claudex-loop-custom'

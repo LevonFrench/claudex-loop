@@ -1,0 +1,13 @@
+{
+  "name": "peer-sessions",
+  "version": "0.1.0",
+  "description": "Run and address multiple persistent Claude and Codex sessions through one local MCP broker.",
+  "author": {
+    "name": "LevonFrench",
+    "url": "https://github.com/LevonFrench"
+  },
+  "homepage": "https://github.com/LevonFrench/claudex-loop/tree/main/plugins/peer-sessions",
+  "repository": "https://github.com/LevonFrench/claudex-loop",
+  "license": "MIT",
+  "keywords": ["claude", "codex", "mcp", "sessions", "windows"]
+}

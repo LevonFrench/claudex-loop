@@ -147,3 +147,8 @@ Install-PromptCopies -SourceRoot $promptSource -DestinationRoot $CodexPromptHome
 
 Write-Output "Codex CLI: $codexExecutable"
 Write-Output "Claude CLI: $claudeExecutable"
+Write-Output ''
+Write-Output 'XLoop skill installation is complete. The optional Peer Sessions MCP plugin is installed separately.'
+Write-Output "Local marketplace source: $repoRoot"
+Write-Output 'Codex: codex plugin marketplace add <source>; codex plugin add peer-sessions@claudex-loop'
+Write-Output 'Claude: claude plugin marketplace add <source>; claude plugin install peer-sessions@claudex-loop-custom'

@@ -1,0 +1,41 @@
+{
+  "manifest_version": "0.3",
+  "name": "peer-sessions",
+  "display_name": "Peer Sessions",
+  "version": "0.1.0",
+  "description": "Run and message multiple persistent Claude and Codex sessions through one Windows-local MCP broker.",
+  "long_description": "Peer Sessions provides named concurrent Claude and Codex sessions to Claude Desktop, Claude Code, and Codex. The broker uses each CLI's structured persistent protocol and mirrors live output to optional visible console windows.",
+  "author": {
+    "name": "LevonFrench",
+    "url": "https://github.com/LevonFrench"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LevonFrench/claudex-loop.git"
+  },
+  "homepage": "https://github.com/LevonFrench/claudex-loop/tree/main/plugins/peer-sessions",
+  "documentation": "https://github.com/LevonFrench/claudex-loop/tree/main/plugins/peer-sessions/README.md",
+  "support": "https://github.com/LevonFrench/claudex-loop/issues",
+  "license": "MIT",
+  "keywords": ["claude", "codex", "sessions", "mcp", "windows"],
+  "tools_generated": true,
+  "privacy_policies": [
+    "https://www.anthropic.com/legal/privacy",
+    "https://openai.com/policies/privacy-policy/"
+  ],
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": {
+      "node": ">=20"
+    }
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/mcp-stdio.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/mcp-stdio.mjs"],
+      "env": {}
+    }
+  }
+}

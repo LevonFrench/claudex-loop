@@ -1,0 +1,34 @@
+{
+  "name": "peer-sessions",
+  "version": "0.1.0",
+  "description": "Run and address multiple persistent Claude and Codex sessions through one local MCP broker.",
+  "author": {
+    "name": "LevonFrench",
+    "url": "https://github.com/LevonFrench"
+  },
+  "homepage": "https://github.com/LevonFrench/claudex-loop/tree/main/plugins/peer-sessions",
+  "repository": "https://github.com/LevonFrench/claudex-loop",
+  "license": "MIT",
+  "keywords": ["claude", "codex", "mcp", "sessions", "windows"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "peer-sessions": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/server/mcp-stdio.mjs"]
+    }
+  },
+  "interface": {
+    "displayName": "Peer Sessions",
+    "shortDescription": "Message named Claude and Codex sessions.",
+    "longDescription": "Launch, inspect, and message multiple persistent Claude and Codex CLI sessions through a Windows-local broker.",
+    "developerName": "LevonFrench",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "List my peer sessions.",
+      "Launch a visible Claude peer session.",
+      "Send a message to a named peer session."
+    ]
+  }
+}

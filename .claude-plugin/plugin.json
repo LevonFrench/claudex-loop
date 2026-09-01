@@ -1,5 +1,6 @@
 {
   "name": "claudex-loop-custom",
+  "version": "0.1.0",
   "description": "Windows-native, wiki-first Claude-Codex loop with durable .loop state, bounded adversarial review, cold resumption, and pinned-commit build inspection. Ships the xloop skill only.",
   "author": {
     "name": "LevonFrench",

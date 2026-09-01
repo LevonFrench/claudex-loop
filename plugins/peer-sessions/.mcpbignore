@@ -1,0 +1,8 @@
+.git/
+.codex-plugin/
+.claude-plugin/
+mcp/
+test/
+node_modules/
+package-lock.json
+*.mcpb

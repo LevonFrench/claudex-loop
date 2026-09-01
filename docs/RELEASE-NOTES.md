@@ -28,6 +28,14 @@ bash ./install.sh
 
 Both installers verify byte-exact copies and preserve existing destinations unless forced.
 
+Peer Sessions is an optional plugin and is installed through the Codex or Claude marketplace commands documented in the root README. Regular Claude Desktop users install the `peer-sessions-0.1.0.mcpb` release asset. It is intentionally separate from the XLoop skill-copy installers because plugin managers own MCP registration and lifecycle.
+
+## Optional direct peer sessions
+
+The `peer-sessions` v0.1 plugin adds a shared per-user MCP broker for multiple named Claude and Codex CLI sessions. Distinct peers run concurrently; successive turns to one peer reuse its provider process and conversation. Visible viewers are the default and may be closed and reopened without stopping a provider.
+
+The broker accepts only fixed Claude and Codex adapters and derives provider permissions from the constrained `read|write` access enum. Claude runs without project hooks/settings/customizations. Codex runs with an isolated private home, zero inherited MCP servers, and ephemeral threads that do not populate Codex Recents. The broker does not expose a generic command launcher, persist transcripts, or replace XLoop's guarded `.loop/` artifacts. The complete boundary and evidence are in `plugins/peer-sessions/SCOPE.md` and `plugins/peer-sessions/ACCEPTANCE.md`.
+
 ## Platform sandbox matrix
 
 | Wrapper argument | Intent | Windows | Non-Windows |
@@ -64,6 +72,8 @@ Passed before publication:
 - Independent protocol/conformance audit
 
 Authenticated warm-wiki and no-wiki acceptance loops remain the final release gate. No stable tag should be created until both pass, including the forced mid-review cold-resume scenario.
+
+Peer Sessions has its own ten gates. Passing them does not by itself close XLoop inspection finding B1.7; the XLoop release remains blocked until a guarded persistent-host integration or equivalent wrapper behavior is specified and accepted.
 
 ## Migration from upstream
 
