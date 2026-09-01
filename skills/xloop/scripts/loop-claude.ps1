@@ -29,7 +29,14 @@ param(
 
     [string[]]$EvidenceFile = @(),
 
+    [string]$EvidenceListFile = '',
+
     [string[]]$AppendOnlyFile = @(),
+
+    [string]$AppendOnlyListFile = '',
+
+    [ValidateSet('', 'any', 'verdict', 'result')]
+    [string]$Expect = '',
 
     [string]$Phase = '',
 
@@ -53,6 +60,9 @@ function Convert-ClaudeEnvelope {
 }
 
 $metadataPath = ''
+$guard = $null
+$violations = New-Object System.Collections.ArrayList
+$appends = New-Object System.Collections.ArrayList
 try {
     $root = (Resolve-Path -LiteralPath $Project).Path
     $loopRoot = Join-Path $root '.loop'
@@ -63,14 +73,6 @@ try {
     $freshPromptPath = if ($FreshPromptFile) { Resolve-LoopFile -Value $FreshPromptFile -Root $root -LoopRoot $loopRoot -MustExist $true } else { $promptPath }
     $outputPath = Resolve-LoopFile -Value $OutFile -Root $root -LoopRoot $loopRoot -MustExist $false
     $metadataPath = $outputPath + '.meta.json'
-    $evidencePaths = @($EvidenceFile | Where-Object { $_ } | ForEach-Object { Resolve-LoopFile -Value $_ -Root $root -LoopRoot $loopRoot -MustExist $false })
-    $appendOnlyPaths = @($AppendOnlyFile | Where-Object { $_ } | ForEach-Object { Resolve-LoopFile -Value $_ -Root $root -LoopRoot $loopRoot -MustExist $false })
-    $prompt = [System.IO.File]::ReadAllText($promptPath).TrimStart([char]0xFEFF)
-    $freshPrompt = [System.IO.File]::ReadAllText($freshPromptPath).TrimStart([char]0xFEFF)
-    if ([string]::IsNullOrWhiteSpace($prompt)) { throw 'Prompt file is empty.' }
-    if ([string]::IsNullOrWhiteSpace($freshPrompt)) { throw 'Fresh fallback prompt file is empty.' }
-    $claude = Resolve-AgentExecutable -Name 'claude' -ExplicitPath $ClaudePath
-    $wantVisible = ($Visible -and -not $Headless)
     $additionalDirectory = ''
     if ($AddDir) {
         $additionalDirectory = (Resolve-Path -LiteralPath $AddDir).Path
@@ -79,6 +81,22 @@ try {
             throw "Refusing reparse-point additional directory: $additionalDirectory"
         }
     }
+
+    # `powershell -File` cannot bind arrays, so list files carry multi-file packets.
+    $evidenceValues = @($EvidenceFile | Where-Object { $_ })
+    if ($EvidenceListFile) { $evidenceValues += @(Read-LoopPathList -Path (Resolve-LoopFile -Value $EvidenceListFile -Root $root -LoopRoot $loopRoot -MustExist $true)) }
+    $appendOnlyValues = @($AppendOnlyFile | Where-Object { $_ })
+    if ($AppendOnlyListFile) { $appendOnlyValues += @(Read-LoopPathList -Path (Resolve-LoopFile -Value $AppendOnlyListFile -Root $root -LoopRoot $loopRoot -MustExist $true)) }
+    $evidencePaths = @($evidenceValues | ForEach-Object { (Resolve-PacketEvidence -Value $_ -Root $root -LoopRoot $loopRoot -AllowedRoot @($additionalDirectory)).Path })
+    $appendOnlyPaths = @($appendOnlyValues | ForEach-Object { Resolve-LoopFile -Value $_ -Root $root -LoopRoot $loopRoot -MustExist $false })
+
+    $prompt = [System.IO.File]::ReadAllText($promptPath).TrimStart([char]0xFEFF)
+    $freshPrompt = [System.IO.File]::ReadAllText($freshPromptPath).TrimStart([char]0xFEFF)
+    if ([string]::IsNullOrWhiteSpace($prompt)) { throw 'Prompt file is empty.' }
+    if ([string]::IsNullOrWhiteSpace($freshPrompt)) { throw 'Fresh fallback prompt file is empty.' }
+    $claude = Resolve-AgentExecutable -Name 'claude' -ExplicitPath $ClaudePath
+    $wantVisible = Get-LoopVisiblePreference -Visible:$Visible -Headless:$Headless
+    $expectedTerminator = if ($Expect) { $Expect } else { Get-ExpectedTerminatorKind -OutputPath $outputPath }
 
     $attempts = New-Object System.Collections.ArrayList
     $fallback = $false
@@ -89,7 +107,6 @@ try {
     $kinds = if ($ResumeSession) { @('resume', 'fresh') } else { @('fresh') }
 
     $guard = New-PacketGuard -LoopRoot $loopRoot -EvidencePath $evidencePaths -AppendOnlyPath $appendOnlyPaths -OutputPath $outputPath
-    $guardResult = $null
 
     foreach ($kind in $kinds) {
         if ($kind -eq 'fresh' -and $ResumeSession) { $fallback = $true }
@@ -107,7 +124,10 @@ try {
         }
         $arguments += @('--strict-mcp-config', '--disable-slash-commands', '--output-format', 'json')
 
-        $native = Invoke-NativeProcess -Executable $claude -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp')
+        $native = Invoke-NativeProcess -Executable $claude -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $guard
+        # Restore before anything else reads .loop, so a mutation from this attempt
+        # can never reach the fresh fallback packet or survive a later failure.
+        [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
         $rawPath = $outputPath + '.' + $kind + '.response.json'
         $errorPath = $outputPath + '.' + $kind + '.stderr.log'
         Write-Utf8NoBomAtomic -Path $rawPath -Content $native.StdOut
@@ -116,8 +136,7 @@ try {
         [void]$attempts.Add($attemptRecord)
 
         if ($native.TimedOut) {
-            $guardResult = Complete-PacketGuard -Guard $guard
-            $metadata = [ordered]@{ tool = 'claude'; exit_code = 3; resumed = ($kind -eq 'resume'); resume_fallback = $false; session_id = $sessionId; out_file = $outputPath; sandbox = $Sandbox; mutations = $guardResult.Violations; appends = $guardResult.Appends; attempts = $attempts }
+            $metadata = [ordered]@{ tool = 'claude'; exit_code = 3; resumed = ($kind -eq 'resume'); resume_fallback = $false; session_id = $sessionId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
             Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
             [Console]::Error.WriteLine($native.StdErr)
             exit 3
@@ -147,21 +166,21 @@ try {
         break
     }
 
-    $guardResult = Complete-PacketGuard -Guard $guard
+    [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
 
     if ($null -eq $selectedEnvelope) {
-        $metadata = [ordered]@{ tool = 'claude'; exit_code = 1; resumed = $false; resume_fallback = $fallback; session_id = $sessionId; out_file = $outputPath; sandbox = $Sandbox; mutations = $guardResult.Violations; appends = $guardResult.Appends; attempts = $attempts }
+        $metadata = [ordered]@{ tool = 'claude'; exit_code = 1; resumed = $false; resume_fallback = $fallback; session_id = $sessionId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
         Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
         [Console]::Error.WriteLine("Claude failed. See $metadataPath")
         exit 1
     }
 
-    $validation = Get-TerminatorValidation -Path $outputPath
-    $mutationCount = @($guardResult.Violations).Count
+    $validation = Get-TerminatorValidation -Path $outputPath -Expect $expectedTerminator
+    $mutationCount = @($violations).Count
     $nudgeClass = ''
     if (-not $validation.Valid) { $nudgeClass = 'format' } elseif ($mutationCount -gt 0) { $nudgeClass = 'mutation' }
     $wrapperExit = if ($nudgeClass) { 2 } else { 0 }
-    [void](Add-UsageLedgerRecord -LoopRoot $loopRoot -Tool 'claude' -OutputPath $outputPath -Telemetry $selectedTelemetry -Phase $Phase)
+    [void](Add-UsageLedgerRecord -LoopRoot $loopRoot -Tool 'claude' -OutputPath $outputPath -Telemetry $selectedTelemetry -Phase $Phase -Guard $guard)
 
     $metadata = [ordered]@{
         tool = 'claude'
@@ -172,10 +191,11 @@ try {
         out_file = $outputPath
         sandbox = $Sandbox
         nudge_class = $nudgeClass
+        expected_terminator = $expectedTerminator
         terminator = $validation.Terminator
         validation_error = $validation.Reason
-        mutations = $guardResult.Violations
-        appends = $guardResult.Appends
+        mutations = @($violations)
+        appends = @($appends)
         attempts = $attempts
     }
     Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
@@ -192,4 +212,7 @@ try {
     }
     [Console]::Error.WriteLine($_.Exception.Message)
     exit 1
+} finally {
+    # Last line of defence: whatever happened above, protected inputs are back.
+    if ($null -ne $guard) { try { [void](Complete-PacketGuard -Guard $guard) } catch { } }
 }
