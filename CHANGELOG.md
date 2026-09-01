@@ -49,6 +49,7 @@ All notable changes to this custom fork are documented here.
 
 ### Security and reliability
 
+- Windows entry scripts canonicalize an existing project root before applying `.loop` containment checks, so Git Bash 8.3 aliases and PowerShell long paths cannot disagree about the same directory.
 - Review calls disable user configuration, repository rules, web search, apps, and subagents where supported.
 - Claude calls use safe and restricted modes with explicit minimal tool sets and narrowly scoped external wiki access.
 - Ambiguous write-resume failures never trigger an automatic second builder; only recognized pre-turn handle or sandbox-switch failures may fall back.

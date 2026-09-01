@@ -64,7 +64,7 @@ $guard = $null
 $violations = New-Object System.Collections.ArrayList
 $appends = New-Object System.Collections.ArrayList
 try {
-    $root = (Resolve-Path -LiteralPath $Project).Path
+    $root = Get-LoopProjectRoot -Project $Project
     $loopRoot = Join-Path $root '.loop'
     if (-not [System.IO.Directory]::Exists($loopRoot)) { throw "Missing loop directory: $loopRoot" }
     if ($Model -and $Model -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$') { throw "Invalid model identifier: $Model" }

@@ -201,7 +201,7 @@ function Get-Transition {
 }
 
 try {
-    $root = (Resolve-Path -LiteralPath $Project).Path
+    $root = Get-LoopProjectRoot -Project $Project
     $statePath = Join-Path (Join-Path $root '.loop') 'STATE.md'
     $state = Read-StateLines -Path $statePath
     $fields = $state.Fields

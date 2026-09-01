@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'loop-common.ps1')
 
 try {
-    $root = (Resolve-Path -LiteralPath $Project).Path
+    $root = Get-LoopProjectRoot -Project $Project
     $loopRoot = Join-Path $root '.loop'
     if (-not [System.IO.Directory]::Exists($loopRoot)) { throw "Missing loop directory: $loopRoot" }
 

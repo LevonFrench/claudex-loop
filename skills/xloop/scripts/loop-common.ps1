@@ -7,6 +7,22 @@ function Test-LoopWindows {
     return ($platform -eq [PlatformID]::Win32NT -or $platform -eq [PlatformID]::Win32Windows -or $platform -eq [PlatformID]::Win32S -or $platform -eq [PlatformID]::WinCE)
 }
 
+function Get-LoopProjectRoot {
+    <#
+    Git Bash can pass an existing Windows directory through its 8.3 alias (for
+    example RUNNER~1). Resolve-Path preserves that spelling while later .NET path
+    operations can expand it, which makes two names for the same directory fail a
+    security prefix check. Get-Item returns the filesystem's long name without
+    resolving reparse-point targets; the existing component walk still rejects
+    reparse points beneath .loop.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Project)
+
+    $item = Get-Item -LiteralPath $Project -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer) { throw "Project is not a directory: $Project" }
+    return [System.IO.Path]::GetFullPath($item.FullName)
+}
+
 function Get-LoopCodexSandboxArgument {
     param([ValidateSet('read-only', 'write')][string]$Intent)
 

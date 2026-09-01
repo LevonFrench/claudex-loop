@@ -90,7 +90,7 @@ function Get-AgentAvailability {
 }
 
 try {
-    $root = (Resolve-Path -LiteralPath $Project).Path
+    $root = Get-LoopProjectRoot -Project $Project
     $loop = Join-Path $root '.loop'
     $statePath = Join-Path $loop 'STATE.md'
     Assert-NotReparsePoint -Path $loop

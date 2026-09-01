@@ -9,6 +9,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'loop-common.ps1')
+
 function Read-State {
     param([string]$Path)
 
@@ -60,7 +62,7 @@ function Get-NextPacket {
 }
 
 try {
-    $root = (Resolve-Path -LiteralPath $Project).Path
+    $root = Get-LoopProjectRoot -Project $Project
     $statePath = Join-Path (Join-Path $root '.loop') 'STATE.md'
     $state = Read-State -Path $statePath
 
