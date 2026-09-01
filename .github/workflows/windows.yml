@@ -20,3 +20,17 @@ jobs:
       - name: Git Bash packaging and cross-shell smoke
         shell: bash
         run: bash ./tests/run-git-bash.sh
+      - name: Doctor report shape and sandbox mapping
+        shell: powershell
+        env:
+          XLOOP_HEADLESS: '1'
+        run: |
+          # The agent CLIs are absent on CI, so doctor's non-zero exit is expected.
+          # What must hold is that it still emits a parsable report with the
+          # platform-correct read-intent sandbox.
+          $report = (.\scripts\doctor.ps1 | Out-String) | ConvertFrom-Json
+          if ($report.checks.review_sandbox.read_intent_codex_sandbox -ne 'workspace-write') {
+            throw "Windows read-intent mapped to $($report.checks.review_sandbox.read_intent_codex_sandbox)."
+          }
+          if (-not $report.checks.powershell_5_1.ok) { throw 'CI did not run Windows PowerShell 5.1.' }
+          Write-Output 'Doctor report validated.'

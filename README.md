@@ -12,6 +12,9 @@ This repository is a tuned fork of [chaseai-yt/claudex-loop](https://github.com/
 - Resume handles are cache hints; every packet has a fresh-invocation fallback.
 - Build inspection targets pre-generated diffs between pinned commits, never a moving tree.
 - BOM-tolerant state, strict terminators, fixed retry caps, lock warnings, and explicit exit codes make failures visible.
+- Summoned agents cannot quietly rewrite durable loop inputs: wrappers snapshot the immutable core and packet evidence, restore any change, quarantine stray files, and still preserve declared append-only closeout work.
+- Agent discovery survives shim-based and desktop installs, and a missing adversary warns at initialization instead of blocking author-only phases.
+- Clerical work has its own bounded helpers, so the driver renders packets and advances state without hand-editing files.
 - No writes to `AGENTS.md`, `CLAUDE.md`, tracked `.gitignore`, or global Git configuration.
 
 ## Flow

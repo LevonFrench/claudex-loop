@@ -50,7 +50,7 @@ $checks = [ordered]@{
     }
     execution_policy = [ordered]@{
         ok = ([string]::IsNullOrEmpty($policyDiagnostic))
-        policy = [string](Get-ExecutionPolicy)
+        policy = Get-EffectiveExecutionPolicy
         remediation = $policyDiagnostic
     }
     review_sandbox = [ordered]@{

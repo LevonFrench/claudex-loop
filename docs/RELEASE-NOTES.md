@@ -28,6 +28,15 @@ bash ./install.sh
 
 Both installers verify byte-exact copies and preserve existing destinations unless forced.
 
+## Platform sandbox matrix
+
+| Wrapper argument | Intent | Windows | Non-Windows |
+|---|---|---|---|
+| `-Sandbox read-only` | Review, inspection, closeout reads | Codex `workspace-write` | Codex `read-only` |
+| `-Sandbox write` | Builder only | Locked dangerous flag | Locked dangerous flag |
+
+The Windows read-only Codex sandbox cannot launch the shell a reviewer needs to read its assigned evidence, so read intent maps to `workspace-write` there. Read intent never selects the builder flag, and it keeps its unconditional one-time fresh-packet fallback. Because a Windows read-intent agent is technically write-capable, both wrappers snapshot the immutable loop core plus every declared packet evidence path, restore anything that changed, quarantine unexpected `.loop` additions, and report the violation as `nudge_class: mutation` without discarding an otherwise valid output.
+
 ## Important safety note
 
 The locked builder flag is `--dangerously-bypass-approvals-and-sandbox`. It is only selected after plan approval, proof-command selection, a clean-tree check, and an approved-baseline check. Run initial live acceptance in a disposable or fully recoverable checkout. Ambiguous write-resume failures stop for operator inspection instead of launching a second builder.

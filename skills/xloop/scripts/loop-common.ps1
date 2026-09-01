@@ -250,14 +250,19 @@ function Resolve-AgentExecutable {
     throw "No runnable $Name executable found. Searched: $($attempts -join ', '). Pass an explicit path to override."
 }
 
+function Get-EffectiveExecutionPolicy {
+    # Missing on constrained hosts; absence is reported, never thrown.
+    try { return [string](Get-ExecutionPolicy) } catch { return '' }
+}
+
 function Get-ExecutionPolicyDiagnostic {
     <#
     Returns a remediation line the user must run themselves, or an empty string.
     Nothing here changes machine policy.
     #>
     $blocked = @('Restricted', 'AllSigned')
-    $effective = ''
-    try { $effective = [string](Get-ExecutionPolicy) } catch { return '' }
+    $effective = Get-EffectiveExecutionPolicy
+    if (-not $effective) { return '' }
     if ($effective -notin $blocked) { return '' }
     return "Execution policy is $effective. XLoop scripts are always invoked with -ExecutionPolicy Bypass, but to run them directly execute this yourself: Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned"
 }
