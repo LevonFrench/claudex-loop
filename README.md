@@ -64,7 +64,34 @@ Existing destinations are preserved unless `-Force` / `--force` is supplied; for
 
 ## Use
 
-Ask Claude to run the `xloop` skill, or invoke the installed `xloop` prompt from Codex with a task or resume instruction. A new run initializes `.loop/`; an existing non-done `STATE.md` resumes at its exact phase and checkpoint.
+Restart Claude and Codex, or open new chats, after installation so they discover the copied skill.
+
+Before a build-capable run, use a recoverable branch, start with a clean working tree, and know the proof command that should pass when the change is complete.
+
+From Claude, ask for the skill by name:
+
+```text
+Use the xloop skill for this task.
+Project: X:\work\project
+Task: add bounded retry handling to the worker.
+Proof command: npm test
+```
+
+From Codex, type `$xloop`, or type `/skills` and select `xloop`, then provide the same project, task, and proof command. Codex can also invoke the skill implicitly when the request clearly asks for a durable cross-model plan/review/build loop.
+
+The installed `/prompts:xloop` command remains as a compatibility entry point, but Codex custom prompts are deprecated; prefer the skill.
+
+A new run initializes `.loop/`. To resume after clearing or losing a session, open either agent in the same project and say:
+
+```text
+$xloop resume this project from .loop/STATE.md
+```
+
+No verbal recap is required. To inspect the checkpoint mechanically:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File <xloop-skill>\scripts\loop-status.ps1 -Project X:\work\project
+```
 
 The locked v1 choices are:
 
