@@ -70,12 +70,17 @@ proof_cmd: npm test
 verdict: REVISE
 open: F2.1,F2.4
 settled: D1,D2,F1.2,F1.5
+format_nudged:
+mutation_nudged: 1
 lock: claude <pid> <ISO-8601>
 closeout_step:
 updated: <ISO-8601>
+max_nudges: 1
 ```
 
 Valid phases: `recon|interrogate|review|build|closeout|done|escalated`. Valid agents: `claude|codex`. `build_step` is blank outside build and one of `summon|pin|inspect|fix|awaiting-user|complete`; `build_round` starts at 1 for the initial build and increments for each fix attempt, so two fix rounds end at 3. At `fix` round N, the input is `b<N-1>-inspect.md` and the output is `b<N>-report.md`; a valid report advances to `pin`, which creates `b<N>.diff`, then `inspect` creates `b<N>-inspect.md`. `escalation_kind` is `review|build`. `closeout_step` is blank before closeout and one of `brief|decisions|lessons|inbox|log|complete`. A lock newer than 30 minutes blocks a second driver. These fields and roles identify the exact next packet. `codex_thread` and `claude_session` are optional optimizations. Append failed-resume labels such as `r3` to `resume_fallback`.
+
+`format_nudged` and `mutation_nudged` are the durable nudge budgets for the current step, each capped by `max_nudges` (default 1) and cleared by every real advance. A nudge is spent in STATE before the retry is summoned, so a cleared conversation cannot grant the same class a second retry: a class whose counter already equals `max_nudges` escalates instead of retrying.
 
 `REQUEST.md` preserves the original user request and any scoped additions before recon begins. User answers and applied defaults are written back into `QUESTIONS.md` before PLAN is changed, so clearing the conversation cannot erase intent.
 
@@ -187,11 +192,13 @@ For round 1, the driver writes `build/b1.diff` with a stat header followed by th
 Every summon declares what may change under `.loop`. Wrappers enforce it around the call, in every phase and in both sandbox modes.
 
 - Always immutable: `STATE.md`, `REQUEST.md`, `PROTOCOL.md`, `PLAN.md`, `REVIEW-LOG.md`, `ASSUMPTIONS.md`, `QUESTIONS.md`. This core is protected even when the packet does not name it, so a resumed review that omits the plan still cannot lose it.
-- Immutable evidence: every packet path passed with `-EvidenceFile`.
-- Replaceable: the assigned output path and its wrapper sidecars.
-- Append-only: paths passed with `-AppendOnlyFile`, such as `wiki-inbox.md` at closeout. The new content must retain the exact previous byte prefix; valid appends survive.
+- Immutable evidence: every packet path passed with `-EvidenceFile`, or one path per line in an `-EvidenceListFile` under `.loop`. Evidence must exist: an unresolvable evidence path fails the summon with exit `1` rather than running the model without it. Evidence outside `.loop`, such as the wiki brief, must live under the project root or an approved `-AddDir` root.
+- Replaceable: the assigned output path and the wrapper's own named sidecars (`.meta.json`, `.<kind>.response.json`, `.<kind>.events.jsonl`, `.<kind>.stderr.log`). Nothing else that merely starts with the output path is internal.
+- Append-only: paths passed with `-AppendOnlyFile` or `-AppendOnlyListFile`, such as `wiki-inbox.md` at closeout. The new content must retain the exact previous byte prefix; valid appends survive.
 
-After the call the wrapper restores mutated or deleted protected files, quarantines unexpected `.loop` additions under `tmp/quarantine/`, and records each violation in the run metadata. Restoration never silently succeeds: a violation returns exit `2` with `nudge_class: mutation`.
+Class precedence is fixed: core outranks evidence, which outranks append-only. A packet that declares a core file, the ledger, the output path, or a declared evidence path as append-only is rejected with exit `1` instead of silently weakening the class. `LEDGER.md` is wrapper-owned and protected by exact bytes.
+
+The guard runs after every attempt and again from a `finally`, so a mutation during a failed resume is restored before the fresh fallback packet is read and cannot survive a later failure. It restores mutated or deleted protected files, quarantines unexpected `.loop` files, directories, and junctions under `tmp/quarantine/`, and records each violation in the run metadata. Restoration never silently succeeds: a violation returns exit `2` with `nudge_class: mutation`.
 
 ### 3.10 Usage ledger
 
@@ -231,11 +238,13 @@ At recon, compare the brief's `verified-against` SHA with HEAD. Map `git diff --
 
 ## 6. Convergence, build, and platform rules
 
-- Maximum five plan-review rounds, two fix rounds, and zero timeout retries. Exit `2` carries `nudge_class`: `format` and `mutation` have independent one-use nudges, so a single formatting slip and a single restored mutation do not consume each other's budget. A repeat of either class escalates, and one summon makes at most three attempts.
+- Maximum five plan-review rounds, two fix rounds, and zero timeout retries. Exit `2` carries `nudge_class`: `format` and `mutation` have independent one-use nudges, so a single formatting slip and a single restored mutation do not consume each other's budget. A repeat of either class escalates, and one summon makes at most three attempts. Record the spend with `loop-step.ps1 -Transition record-nudge -NudgeClass format|mutation` before summoning the retry; when that transition refuses, escalate.
 - `APPROVE` is parsed, never inferred. Invalid `REVISE`, missing terminator, malformed output, or a pseudo-finding under `APPROVE` gets exactly one format nudge; a second failure of that class escalates as one user batch.
+- The packet decides which terminator is legal, and the wrapper enforces it from the assigned output name: `r<N>-findings.md` and `b<N>-inspect.md` require `VERDICT:`, `b<N>-report.md` and `CLOSEOUT-REPORT.md` require `RESULT:`, and `-Expect verdict|result` states it explicitly for any other path. A verdict file may contain finding-shaped lines only in the exact `[F<round>.<i>]`/`[B<round>.<i>] severity | reference | claim` form; a bare `[F5]` or a severity-less header is a pseudo-finding and invalidates the file under either verdict.
 - Codex read-intent maps to the `workspace-write` sandbox on Windows and `read-only` elsewhere, for both the fresh `-s` form and the resumed `-c sandbox_mode=` form. Read-intent keeps its unconditional one-time fresh-packet fallback. Only `-Sandbox write` selects the locked dangerous build flag, and only that mode stops on an ambiguous post-turn resume failure.
-- Summons are headless unless the driver passes `-Visible`. A visible summon hands its transcript and exit code back through durable files; `XLOOP_HEADLESS=1` forces headless so unattended runs never open a window.
-- Clerical work belongs to `loop-render.ps1` and `loop-step.ps1`: strict placeholder rendering and named idempotent state transitions. Neither reads findings, arbitrates, nor invokes a model, and the driver still owns every decision.
+- A summon is watchable when a real console is attached, when `-Visible` is passed, or when `XLOOP_VISIBLE=1` is set; it is headless whenever a driver or CI is capturing the streams, or `-Headless`/`XLOOP_HEADLESS=1` is used. A watchable summon streams the transcript live, hands its exit code back through durable files, and deletes that handoff material afterwards.
+- Clerical work belongs to `loop-render.ps1` and `loop-step.ps1`: strict placeholder rendering and named idempotent state transitions. Neither reads findings, arbitrates, nor invokes a model, and the driver still owns every decision. An advancing transition names its target (`-ToRound`, `-ToBuildRound`, `-ToCloseoutStep`, `-Attempt`), so replaying it after a crash reports `already_applied` instead of advancing again, and values written by the same call (such as `-PinnedSha` with `build-inspect`) satisfy that call's own prerequisites.
+- Agent executables are resolved to canonical absolute paths and validated with a bounded `--version` probe, so the summon launches the binary that was checked and a hanging probe cannot outlive discovery.
 - Round 5 `REVISE` escalates surviving blockers and both positions. There is no round 6.
 - Build begins only after review approval, a configured proof command, clean `git -C <project> status -sb`, and HEAD exactly equal to `base_sha`. Ask once whether to commit, stash, or abort for dirt; if HEAD moved cleanly, return to bounded drift reconciliation/review rather than folding unrelated commits into the build range.
 - Record `base_sha` at approval. Builder changes are small new commits. Pin HEAD before each inspection. Fixes are new commits and cause a new pin; never amend reviewed commits.

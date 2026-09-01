@@ -12,13 +12,13 @@ Write `.loop/build/CONTRACT.md` using protocol §3.7. Key paths come from the br
 
 ## Summon the builder
 
-When `build_step: summon`, render `templates/build.txt` with paths only and invoke the reviewer agent in write mode. Pass the contract, plan, and brief with `-EvidenceFile`; the builder may change repository source but the immutable core and packet evidence stay protected. Inspection is a read-intent summon: pass `-Sandbox read-only` plus the diff and report as `-EvidenceFile` so the pinned evidence cannot move under the inspector. Try its review session/thread first because it already knows the plan. If sandbox switching or resume fails, retry fresh with the same self-sufficient packet and log the fallback.
+When `build_step: summon`, render `templates/build.txt` with paths only and invoke the reviewer agent in write mode. Pass the contract, plan, and brief with `-EvidenceFile`, or list them in an `-EvidenceListFile`; the builder may change repository source but the immutable core and packet evidence stay protected. Inspection is a read-intent summon: pass `-Sandbox read-only` plus the plan, brief, diff, and report as evidence so the pinned evidence cannot move under the inspector. Evidence must exist: if the pinned diff or brief path is wrong the summon fails with exit `1` rather than inspecting without it. In a project with no brief yet, keep the packet's brief slot explicit and simply omit it from evidence. Try its review session/thread first because it already knows the plan. If sandbox switching or resume fails, retry fresh with the same self-sufficient packet and log the fallback.
 
 The builder makes small commits, runs the proof, and writes `build/b<N>-report.md` with commit list, diff stat, at most 50 proof-tail lines, and final `RESULT: PASS|FAIL`. The builder must not write state or inspection files. After validating the report, the driver atomically sets `build_step: pin`; STATE is updated last.
 
 ## Pin and inspect
 
-When `build_step: pin`, copy the prior pin to `previous_pinned_sha`, set `pinned_sha` to HEAD, and generate `build/b<N>.diff` with a stat header. Round 1 uses the full `<base_sha>..<pinned_sha>` diff; later rounds use `<previous_pinned_sha>..<pinned_sha>`. Use `git -c diff.external= -C <project> diff --no-ext-diff --no-textconv` for both. Then set `build_step: inspect`. Pin before reading: inspection never targets the moving worktree.
+When `build_step: pin`, copy the prior pin to `previous_pinned_sha`, set `pinned_sha` to HEAD, and generate `build/b<N>.diff` with a stat header. Record the pin and the step together: `loop-step.ps1 -Transition build-inspect -PinnedSha <head> -PreviousPinnedSha <prior>` checks the prerequisite against the pin it is writing, so the move is one atomic state write and a replay after a crash reports `already_applied`. Round 1 uses the full `<base_sha>..<pinned_sha>` diff; later rounds use `<previous_pinned_sha>..<pinned_sha>`. Use `git -c diff.external= -C <project> diff --no-ext-diff --no-textconv` for both. Then set `build_step: inspect`. Pin before reading: inspection never targets the moving worktree.
 
 Run `proof_cmd` independently. Inspect the diff stat first. Read full hunks only for:
 
@@ -26,7 +26,7 @@ Run `proof_cmd` independently. Inspect the diff stat first. Read full hunks only
 2. files touching plan risk areas,
 3. files with more than 300 changed lines.
 
-The inspector's complete evidence plane is the generated diff, brief, plan Goal/Decisions/Non-goals, and builder report. Do not explore the repository or run Git during semantic inspection. Write `build/b<N>-inspect.md` with the findings schema and a validated verdict. APPROVE sets `build_step: complete`. REVISE increments `build_round` and sets `build_step: fix` only when fewer than `max_fix_rounds` fixes have run; otherwise follow the exhaustion rule below.
+The inspector's complete evidence plane is the generated diff, brief, plan Goal/Decisions/Non-goals, and builder report. Do not explore the repository or run Git during semantic inspection. Write `build/b<N>-inspect.md` with the findings schema and a validated verdict; that name demands a `VERDICT:` terminator, while `b<N>-report.md` demands `RESULT:`. APPROVE sets `build_step: complete`. REVISE moves to the next fix round with `loop-step.ps1 -Transition build-fix -ToBuildRound <n>`, and only when fewer than `max_fix_rounds` fixes have run; otherwise follow the exhaustion rule below.
 
 ## Fix rounds
 

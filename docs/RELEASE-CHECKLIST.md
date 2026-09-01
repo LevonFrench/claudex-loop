@@ -36,18 +36,21 @@ Each gate below is classified. A **blocking** gate must pass before a stable tag
 
 - [ ] Kill the driving session between review rounds 2 and 3, then resume from `.loop/` without a human recap.
 - [ ] Confirm a bad resume handle uses the separately rendered fresh packet and records fallback metadata.
-- [ ] Re-run the last `loop-step.ps1` transition after the kill and confirm it reports `already_applied` rather than double-advancing.
+- [ ] Re-run the last `loop-step.ps1` transition after the kill and confirm it reports `already_applied` rather than double-advancing, including an advancing transition such as `review-next-round -ToRound <n>`.
+- [ ] Confirm a spent nudge is still recorded in `STATE.md` after the kill, so the resumed driver escalates instead of granting the same class another retry.
 
 ### Contract enforcement (blocking)
 
 - [ ] Confirm malformed findings are preserved and receive exactly one corrective format retry.
 - [ ] Confirm a summoned agent that edits `STATE.md` is restored, reported as `nudge_class: mutation`, and nudged independently of the format budget.
 - [ ] Confirm closeout's wiki-inbox append survives while a rewrite of its existing bytes is rolled back.
+- [ ] Confirm a mistyped evidence path fails the summon with exit `1` instead of running the model without that evidence.
+- [ ] Confirm a findings file ending in `RESULT: PASS`, or a report ending in `VERDICT: APPROVE`, is rejected as malformed for that packet.
 
 ### Measurement and ergonomics (advisory)
 
 - [ ] Confirm `.loop/LEDGER.md` accumulates counts-only lines and never prompt or response text.
-- [ ] Confirm a `-Visible` summon is watchable and still returns its exit code, and that `XLOOP_HEADLESS=1` suppresses the window.
+- [ ] Confirm a `-Visible` summon shows live output, returns its exit code, leaves no `visible-*` handoff files under `.loop`, and reports no packet violation; confirm `XLOOP_HEADLESS=1` suppresses the window.
 - [ ] Confirm `-Model` reaches the Codex invocation and an invalid identifier is refused.
 
 ## Publication

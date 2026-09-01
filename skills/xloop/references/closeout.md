@@ -4,7 +4,7 @@ Read this file only when `STATE.md` says `phase: closeout`.
 
 Closeout is mechanical knowledge transcription, not another design or review round. Render `templates/closeout.txt` with paths only and invoke one cheap-tier headless Claude call using `closeout_model` from state/protocol. It writes `.loop/CLOSEOUT-REPORT.md` ending `RESULT: PASS|FAIL`.
 
-Pass `-AppendOnlyFile` for `.loop/wiki-inbox.md` so the required inbox append survives, and `-EvidenceFile` for the diff and report. The immutable core is protected here exactly as during review: the closeout agent never writes `STATE.md`, even to record a step it just finished. The driver advances `closeout_step` with `scripts/loop-step.ps1 -Transition closeout-next` after each successful upsert.
+Pass `-AppendOnlyFile` for `.loop/wiki-inbox.md` so the required inbox append survives, and `-EvidenceFile` for the diff and report. Do not pass the brief as evidence here: closeout patches it, and evidence is immutable. The immutable core is protected exactly as during review: the closeout agent never writes `STATE.md`, even to record a step it just finished. The driver advances `closeout_step` with `scripts/loop-step.ps1 -Transition closeout-next -ToCloseoutStep <step>` after each successful upsert, so replaying the checkpoint after a crash cannot skip a step. `CLOSEOUT-REPORT.md` demands a `RESULT:` terminator.
 
 ## Required updates
 

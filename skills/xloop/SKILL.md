@@ -25,7 +25,8 @@ Use files under `<project>/.loop/` as the only shared memory. The agent the user
 
 - Only the driving agent writes `STATE.md`. Summoned agents write only their assigned output file, plus declared append-only paths. Wrappers restore anything else and report it.
 - Variable prompt content is paths and the round number. Never inline plan, findings, diffs, or wiki articles into a prompt. Render packets with `scripts/loop-render.ps1` and advance state with `scripts/loop-step.ps1`; both are clerical helpers that never judge.
-- Use the shipped PowerShell wrappers even from Git Bash. Respect their exit codes: `0` proceed, `2` one nudge for that `nudge_class` then escalate, `3` surface timeout without retry, `1` fresh retry only after a failed resume attempt.
+- Use the shipped PowerShell wrappers even from Git Bash. Respect their exit codes: `0` proceed, `2` one nudge for that `nudge_class` then escalate, `3` surface timeout without retry, `1` fresh retry only after a failed resume attempt. Spend the nudge with `scripts/loop-step.ps1 -Transition record-nudge -NudgeClass <class>` before retrying; if it refuses, the budget is gone and the run escalates.
+- Advancing transitions declare their target (`-ToRound`, `-ToBuildRound`, `-ToCloseoutStep`), so a crash between a durable action and its checkpoint replays safely instead of skipping a round.
 - Review and inspection use `-Sandbox read-only`. That is read intent; the wrapper picks the platform-correct Codex sandbox. Only the builder uses `-Sandbox write`.
 - Ask user questions in one phase-boundary batch. Persist the batch before displaying it.
 - Never infer approval. Only a validated terminal `VERDICT: APPROVE` approves review or inspection.
@@ -38,8 +39,9 @@ At each transition, update the plain-line state atomically, including `phase`, `
 
 All of these are off by default; none changes the durable protocol.
 
-- `-Visible` opens a watchable console for an interactive summon and still returns a durable exit code. `-Headless`, or `XLOOP_HEADLESS=1`, forces the normal windowless path for unattended runs.
+- A summon is watchable whenever this wrapper owns a real console, and `-Visible` or `XLOOP_VISIBLE=1` asks for one explicitly. Its transcript streams live and its exit code still comes back durably. `-Headless`, or `XLOOP_HEADLESS=1`, forces the windowless path whenever a driver or CI is capturing the streams.
 - `-Model <id>` overrides the model for one summon after validation. There is no per-stage model policy.
 - `-CodexPath` / `-ClaudePath` pin an executable when discovery picks the wrong one.
-- `-EvidenceFile` marks packet inputs immutable; `-AppendOnlyFile` marks a path the agent may extend but never rewrite.
+- `-EvidenceFile` marks packet inputs immutable; `-AppendOnlyFile` marks a path the agent may extend but never rewrite. From `powershell -File` (including Git Bash) pass several with `-EvidenceListFile` / `-AppendOnlyListFile`, one path per line under `.loop`; array parameters do not bind across that boundary. Evidence must exist, so a mistyped path fails the summon rather than silently shrinking the packet.
+- `-Expect verdict|result` states which terminator the packet demands. Canonical output names (`r<N>-findings.md`, `b<N>-inspect.md`, `b<N>-report.md`, `CLOSEOUT-REPORT.md`) already imply it.
 - `.loop/LEDGER.md` accumulates counts-only usage lines when the CLI reports them. It is best effort and never changes a summon's result.

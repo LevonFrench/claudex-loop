@@ -35,7 +35,7 @@ Both installers verify byte-exact copies and preserve existing destinations unle
 | `-Sandbox read-only` | Review, inspection, closeout reads | Codex `workspace-write` | Codex `read-only` |
 | `-Sandbox write` | Builder only | Locked dangerous flag | Locked dangerous flag |
 
-The Windows read-only Codex sandbox cannot launch the shell a reviewer needs to read its assigned evidence, so read intent maps to `workspace-write` there. Read intent never selects the builder flag, and it keeps its unconditional one-time fresh-packet fallback. Because a Windows read-intent agent is technically write-capable, both wrappers snapshot the immutable loop core plus every declared packet evidence path, restore anything that changed, quarantine unexpected `.loop` additions, and report the violation as `nudge_class: mutation` without discarding an otherwise valid output.
+The Windows read-only Codex sandbox cannot launch the shell a reviewer needs to read its assigned evidence, so read intent maps to `workspace-write` there. Read intent never selects the builder flag, and it keeps its unconditional one-time fresh-packet fallback. Because a Windows read-intent agent is technically write-capable, both wrappers snapshot the immutable loop core plus every declared packet evidence path, restore anything that changed, quarantine unexpected `.loop` files, directories, and junctions, and report the violation as `nudge_class: mutation` without discarding an otherwise valid output. The guard runs after every attempt and again from a `finally`, so a mutation during a failed resume never reaches the fresh fallback packet, and protection classes have fixed precedence: a packet cannot declare the immutable core or the usage ledger as append-only.
 
 ## Important safety note
 
