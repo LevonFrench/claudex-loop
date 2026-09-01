@@ -545,7 +545,7 @@ try {
         Assert-True -Condition ($pinInit.ExitCode -eq 0) -Message "Pin-project initialization failed: $($pinInit.Output)"
         $pinStatePath = Join-Path $pinProject '.loop\STATE.md'
         $pinStateText = [IO.File]::ReadAllText($pinStatePath)
-        $pinStateText = $pinStateText -replace '(?m)^phase: recon$', 'phase: build' -replace '(?m)^build_round: 0$', 'build_round: 1' -replace '(?m)^build_step:$', 'build_step: summon'
+        $pinStateText = $pinStateText -replace '(?m)^phase: recon(?=\r?$)', 'phase: build' -replace '(?m)^build_round: 0(?=\r?$)', 'build_round: 1' -replace '(?m)^build_step:(?=\r?$)', 'build_step: summon'
         [IO.File]::WriteAllText($pinStatePath, $pinStateText, (New-Object Text.UTF8Encoding($false)))
         $pinStep = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $pinProject, '-Transition', 'build-pin')
         Assert-True -Condition ($pinStep.ExitCode -eq 0) -Message "build-pin failed: $($pinStep.Output)"
