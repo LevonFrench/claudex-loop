@@ -176,11 +176,14 @@ proof_cmd:
 verdict:
 open:
 settled:
+format_nudged:
+mutation_nudged:
 lock: $Author $PID $stamp
 updated: $stamp
 closeout_step:
 max_rounds: $MaxRounds
 max_fix_rounds: $MaxFixRounds
+max_nudges: 1
 drift_commit_threshold: 30
 stale_brief_pct: 50
 recon_file_cap: 15

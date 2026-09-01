@@ -18,12 +18,31 @@ param(
         'build-to-closeout',
         'closeout-next',
         'closeout-done',
+        'record-nudge',
         'refresh-lock'
     )]
     [string]$Transition,
 
     [ValidateSet('claude', 'codex')]
     [string]$Agent = '',
+
+    # Advancing transitions carry the step they are advancing to. A crash between a
+    # durable action and its checkpoint then replays as "already applied" instead of
+    # advancing a second time.
+    [ValidateRange(0, 5)]
+    [int]$ToRound = 0,
+
+    [ValidateRange(0, 3)]
+    [int]$ToBuildRound = 0,
+
+    [ValidateSet('', 'brief', 'decisions', 'lessons', 'inbox', 'log', 'complete')]
+    [string]$ToCloseoutStep = '',
+
+    [ValidateSet('', 'format', 'mutation')]
+    [string]$NudgeClass = '',
+
+    [ValidateRange(1, 3)]
+    [int]$Attempt = 1,
 
     [string]$PinnedSha = '',
     [string]$PreviousPinnedSha = '',
@@ -92,12 +111,19 @@ function Write-StateLines {
 }
 
 function Get-Transition {
-    param([string]$Name, $Fields, [string]$Agent)
+    <#
+    $Fields is the effective state: the current file overlaid with the values this
+    invocation is also writing. Prerequisites and derived values are therefore
+    evaluated against the state the transition actually produces, so recording a pin
+    and moving to inspection is one atomic step rather than two ordered ones.
+    #>
+    param([string]$Name, $Fields, [string]$Agent, [int]$ToRound, [int]$ToBuildRound, [string]$ToCloseoutStep, [string]$NudgeClass, [int]$Attempt)
 
     $round = [int]$Fields['round']
     $buildRound = [int]$Fields['build_round']
     $maxRounds = if ($Fields.Contains('max_rounds') -and $Fields['max_rounds']) { [int]$Fields['max_rounds'] } else { 5 }
     $maxFixRounds = if ($Fields.Contains('max_fix_rounds') -and $Fields['max_fix_rounds']) { [int]$Fields['max_fix_rounds'] } else { 2 }
+    $maxNudges = if ($Fields.Contains('max_nudges') -and $Fields['max_nudges']) { [int]$Fields['max_nudges'] } else { 1 }
     $closeoutOrder = @('brief', 'decisions', 'lessons', 'inbox', 'log', 'complete')
 
     switch ($Name) {
@@ -108,8 +134,10 @@ function Get-Transition {
             return @{ From = @{ phase = 'interrogate' }; To = [ordered]@{ phase = 'review'; round = '1'; build_round = '0'; build_step = ''; verdict = '' } }
         }
         'review-next-round' {
-            if ($round -ge $maxRounds) { throw "Round $round is the configured maximum; there is no round $($round + 1)." }
-            return @{ From = @{ phase = 'review' }; To = [ordered]@{ phase = 'review'; round = [string]($round + 1); verdict = 'REVISE' } }
+            if ($ToRound -lt 1) { throw 'review-next-round requires -ToRound <n>: the round you are about to run.' }
+            if ($ToRound -gt $maxRounds) { throw "Round $ToRound exceeds the configured maximum of $maxRounds; escalate instead." }
+            if ($ToRound -ne $round -and $ToRound -ne ($round + 1)) { throw "STATE.md is at round $round, so -ToRound must be $($round + 1) or a replay of $round, not $ToRound." }
+            return @{ From = @{ phase = 'review' }; To = [ordered]@{ phase = 'review'; round = [string]$ToRound; verdict = 'REVISE' } }
         }
         'review-approve' {
             if (-not $Fields['proof_cmd']) { throw 'Cannot approve into build without a configured proof_cmd.' }
@@ -126,8 +154,10 @@ function Get-Transition {
             return @{ From = @{ phase = 'build'; build_step = 'pin' }; To = [ordered]@{ phase = 'build'; build_step = 'inspect' } }
         }
         'build-fix' {
-            if ($buildRound -ge ($maxFixRounds + 1)) { throw "Fix rounds are exhausted at build_round $buildRound." }
-            return @{ From = @{ phase = 'build'; build_step = 'inspect' }; To = [ordered]@{ phase = 'build'; build_step = 'fix'; build_round = [string]($buildRound + 1) } }
+            if ($ToBuildRound -lt 1) { throw 'build-fix requires -ToBuildRound <n>: the fix round you are about to run.' }
+            if ($ToBuildRound -gt ($maxFixRounds + 1)) { throw "Fix rounds are exhausted: -ToBuildRound $ToBuildRound exceeds max_fix_rounds $maxFixRounds." }
+            if ($ToBuildRound -ne $buildRound -and $ToBuildRound -ne ($buildRound + 1)) { throw "STATE.md is at build_round $buildRound, so -ToBuildRound must be $($buildRound + 1) or a replay of $buildRound, not $ToBuildRound." }
+            return @{ From = @{ phase = 'build'; build_step = 'inspect' }; To = [ordered]@{ phase = 'build'; build_step = 'fix'; build_round = [string]$ToBuildRound } }
         }
         'build-complete' {
             return @{ From = @{ phase = 'build'; build_step = 'inspect' }; To = [ordered]@{ phase = 'build'; build_step = 'complete' } }
@@ -142,11 +172,26 @@ function Get-Transition {
             $current = $Fields['closeout_step']
             $index = [array]::IndexOf($closeoutOrder, $current)
             if ($index -lt 0) { throw "Unknown closeout_step: $current" }
-            if ($current -eq 'complete') { return @{ From = @{ phase = 'closeout' }; To = [ordered]@{ phase = 'closeout'; closeout_step = 'complete' } } }
-            return @{ From = @{ phase = 'closeout' }; To = [ordered]@{ phase = 'closeout'; closeout_step = $closeoutOrder[$index + 1] } }
+            if (-not $ToCloseoutStep) { throw 'closeout-next requires -ToCloseoutStep <step>: the step you are about to run.' }
+            $next = if ($current -eq 'complete') { 'complete' } else { $closeoutOrder[$index + 1] }
+            if ($ToCloseoutStep -ne $current -and $ToCloseoutStep -ne $next) { throw "STATE.md is at closeout_step $current, so -ToCloseoutStep must be $next or a replay of $current, not $ToCloseoutStep." }
+            return @{ From = @{ phase = 'closeout' }; To = [ordered]@{ phase = 'closeout'; closeout_step = $ToCloseoutStep } }
         }
         'closeout-done' {
             return @{ From = @{ phase = 'closeout'; closeout_step = 'complete' }; To = [ordered]@{ phase = 'done'; verdict = 'APPROVE'; open = ''; lock = '' } }
+        }
+        'record-nudge' {
+            # One nudge per failure class per step, spent durably before the retry is
+            # summoned. A cold resume reads the counter instead of trusting session
+            # memory, so the three-attempt cap survives a cleared conversation.
+            if (-not $NudgeClass) { throw 'record-nudge requires -NudgeClass format|mutation.' }
+            $field = $NudgeClass + '_nudged'
+            if (-not $Fields.Contains($field)) { throw "STATE.md has no field named ${field}: reinitialize the loop to record nudge budgets." }
+            if ($Attempt -gt $maxNudges) { throw "The $NudgeClass nudge budget is $maxNudges; attempt $Attempt must escalate instead of retrying." }
+            $spent = if ($Fields[$field]) { [int]$Fields[$field] } else { 0 }
+            if ($spent -gt $maxNudges) { throw "STATE.md already records $spent $NudgeClass nudges, over the budget of $maxNudges." }
+            if ($Attempt -ne $spent -and $Attempt -ne ($spent + 1)) { throw "The $NudgeClass budget records $spent spent, so -Attempt must be $($spent + 1) or a replay of $spent, not $Attempt." }
+            return @{ From = @{}; To = [ordered]@{ $field = [string]$Attempt } }
         }
         'refresh-lock' {
             return @{ From = @{}; To = [ordered]@{} }
@@ -187,7 +232,14 @@ try {
         $overrides[$key] = $text
     }
 
-    $plan = Get-Transition -Name $Transition -Fields $fields -Agent $Agent
+    # Prerequisites are checked against the state this call produces, not the state
+    # it found: `build-inspect -PinnedSha <head>` records the pin and the step in one
+    # atomic write instead of failing for the pin it is carrying.
+    $effective = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    foreach ($key in @($fields.Keys)) { $effective[$key] = $fields[$key] }
+    foreach ($key in @($overrides.Keys)) { $effective[$key] = $overrides[$key] }
+
+    $plan = Get-Transition -Name $Transition -Fields $effective -Agent $Agent -ToRound $ToRound -ToBuildRound $ToBuildRound -ToCloseoutStep $ToCloseoutStep -NudgeClass $NudgeClass -Attempt $Attempt
     $updates = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
     foreach ($key in @($plan.To.Keys)) { $updates[$key] = $plan.To[$key] }
     foreach ($key in @($overrides.Keys)) { $updates[$key] = $overrides[$key] }
@@ -203,6 +255,13 @@ try {
             $expected = [string]$plan.From[$key]
             if ($fields[$key] -cne $expected) {
                 throw "Transition $Transition expects $key=$expected but STATE.md has $key=$($fields[$key])."
+            }
+        }
+        # A real advance starts a new step, and a new step gets fresh nudge budgets.
+        # Replaying an applied transition must never refund a spent one.
+        if ($Transition -notin @('record-nudge', 'refresh-lock')) {
+            foreach ($field in @('format_nudged', 'mutation_nudged')) {
+                if ($fields.Contains($field) -and -not $updates.Contains($field)) { $updates[$field] = '' }
             }
         }
     }
@@ -225,6 +284,8 @@ try {
         build_round = [string]$(if ($updates.Contains('build_round')) { $updates['build_round'] } else { $fields['build_round'] })
         build_step = [string]$(if ($updates.Contains('build_step')) { $updates['build_step'] } else { $fields['build_step'] })
         closeout_step = [string]$(if ($updates.Contains('closeout_step')) { $updates['closeout_step'] } else { $fields['closeout_step'] })
+        format_nudged = [string]$(if ($updates.Contains('format_nudged')) { $updates['format_nudged'] } elseif ($fields.Contains('format_nudged')) { $fields['format_nudged'] } else { '' })
+        mutation_nudged = [string]$(if ($updates.Contains('mutation_nudged')) { $updates['mutation_nudged'] } elseif ($fields.Contains('mutation_nudged')) { $fields['mutation_nudged'] } else { '' })
     }
 
     if (-not $WhatIfOnly) { Write-StateLines -Path $statePath -State $state -Updates $updates }

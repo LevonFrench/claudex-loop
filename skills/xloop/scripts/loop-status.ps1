@@ -108,6 +108,12 @@ try {
         }
     }
 
+    # Nudge budgets are durable so a cleared conversation cannot grant a second
+    # retry of the same class. Loops initialized before they existed read as unspent.
+    $formatNudged = if ($state.ContainsKey('format_nudged') -and $state['format_nudged']) { [int]$state['format_nudged'] } else { 0 }
+    $mutationNudged = if ($state.ContainsKey('mutation_nudged') -and $state['mutation_nudged']) { [int]$state['mutation_nudged'] } else { 0 }
+    $maxNudges = if ($state.ContainsKey('max_nudges') -and $state['max_nudges']) { [int]$state['max_nudges'] } else { 1 }
+
     $result = [ordered]@{
         project = $root
         loop = $state['loop']
@@ -124,6 +130,10 @@ try {
         previous_pinned_sha = $state['previous_pinned_sha']
         resume_fallback = $state['resume_fallback']
         closeout_step = $state['closeout_step']
+        format_nudged = $formatNudged
+        mutation_nudged = $mutationNudged
+        format_nudge_left = [Math]::Max(0, $maxNudges - $formatNudged)
+        mutation_nudge_left = [Math]::Max(0, $maxNudges - $mutationNudged)
         lock_fresh = $lockFresh
         lock_owner = $lockOwner
         next_packet = Get-NextPacket -State $state
@@ -134,6 +144,9 @@ try {
     } else {
         Write-Output ("Loop {0}: phase={1}, round={2}, author={3}, reviewer={4}, verdict={5}" -f $result.loop, $result.phase, $result.round, $result.author, $result.reviewer, $result.verdict)
         Write-Output ("Next packet: {0}" -f $result.next_packet)
+        if ($formatNudged -gt 0 -or $mutationNudged -gt 0) {
+            Write-Output ("Nudges spent this step: format {0}/{1}, mutation {2}/{1}. A spent class escalates instead of retrying." -f $formatNudged, $maxNudges, $mutationNudged)
+        }
         if ($lockFresh) {
             [Console]::Error.WriteLine("WARNING: fresh loop lock held by $lockOwner. Do not clobber without user confirmation.")
         }
