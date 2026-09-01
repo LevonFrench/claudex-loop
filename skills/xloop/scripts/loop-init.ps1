@@ -52,6 +52,9 @@ function Invoke-GitText {
     try {
         $output = @(& git -C $Root @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
+    } catch {
+        # A project without Git still gets a loop directory; only the exclude entry is skipped.
+        return [pscustomobject]@{ ExitCode = 127; Text = '' }
     } finally {
         $ErrorActionPreference = $savedPreference
     }

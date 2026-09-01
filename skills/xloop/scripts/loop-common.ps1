@@ -110,7 +110,7 @@ function Get-TerminatorValidation {
     if ($terminator -eq 'VERDICT: APPROVE') {
         # An approval carries zero findings and zero pseudo-findings. A malformed ID
         # such as [F5] or [B2] is still a finding-shaped claim and invalidates APPROVE.
-        if ($text -match '(?m)^\s{0,4}\[(?:F|B)[^\]]*\]') {
+        if ($text -match '(?m)^\s{0,4}\[(?:F|B)\d[^\]]*\]') {
             return [pscustomobject]@{ Valid = $false; Terminator = $terminator; Reason = 'APPROVE cannot contain finding or pseudo-finding lines.' }
         }
     }

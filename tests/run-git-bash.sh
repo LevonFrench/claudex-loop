@@ -44,8 +44,32 @@ diff -u <(cd "$claude_home/xloop" && find . -type f -print0 | sort -z | xargs -0
 diff -u <(cd "$repo_root/skills/xloop" && find . -type f -print0 | sort -z | xargs -0 sha256sum) \
         <(cd "$claude_home/xloop" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
 
-ps_test="$(cygpath -w "$repo_root/tests/mechanical-smoke.ps1")"
+for script in loop-common.ps1 loop-visible-run.ps1 loop-render.ps1 loop-step.ps1; do
+  [[ -f "$claude_home/xloop/scripts/$script" ]]
+done
+
 export MSYS2_ARG_CONV_EXCL='*'
+
+# The clerical helpers must work when the driver is running under Git Bash.
+project="$tmp_root/project from bash"
+mkdir -p -- "$project/.loop/tmp" "$project/.loop/rounds"
+printf 'loop: bash-smoke\nphase: recon\nround: 0\nbuild_round: 0\nbuild_step:\nescalation_kind:\nauthor: codex\nreviewer: claude\ncodex_thread:\nclaude_session:\nresume_fallback:\nwiki:\nbrief:\nbrief_verified:\nbase_sha:\npinned_sha:\nprevious_pinned_sha:\nproof_cmd:\nverdict:\nopen:\nsettled:\nlock: codex 1 2026-01-01T00:00:00-05:00\nupdated: 2026-01-01T00:00:00-05:00\ncloseout_step:\nmax_rounds: 5\nmax_fix_rounds: 2\n' >"$project/.loop/STATE.md"
+printf 'round=1\nprotocol_path=.loop/PROTOCOL.md\nstate_path=.loop/STATE.md\nreview_log_path=.loop/REVIEW-LOG.md\nplan_path=.loop/PLAN.md\nbrief_path=(none)\noutput_path=.loop/rounds/r1-findings.md\n' >"$project/.loop/tmp/values.txt"
+
+win_project="$(cygpath -w "$project")"
+win_render="$(cygpath -w "$repo_root/skills/xloop/scripts/loop-render.ps1")"
+win_step="$(cygpath -w "$repo_root/skills/xloop/scripts/loop-step.ps1")"
+
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_render" \
+  -Project "$win_project" -Template 'review-r1.txt' -OutFile '.loop\tmp\r1.txt' -ValuesFile '.loop\tmp\values.txt' >/dev/null
+grep -Fq 'Output: .loop/rounds/r1-findings.md' "$project/.loop/tmp/r1.txt"
+! grep -Fq '{{' "$project/.loop/tmp/r1.txt"
+
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$win_step" \
+  -Project "$win_project" -Transition 'recon-to-interrogate' >/dev/null
+grep -Eq '^phase: interrogate$' "$project/.loop/STATE.md"
+
+ps_test="$(cygpath -w "$repo_root/tests/mechanical-smoke.ps1")"
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$ps_test" >/dev/null
 
 printf '%s\n' 'Offline Git Bash smoke tests passed.'
