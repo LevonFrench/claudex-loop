@@ -1,5 +1,9 @@
 Perform idempotent mechanical wiki closeout. Read the protocol, state, approved plan, settled ledger, wiki inbox, final diff, builder report, and brief target at these paths. Resume from closeout_step; upsert by loop ID and pinned SHA. Write compiled wiki content only as Claude. Record completed steps and terminal RESULT in the report; do not redesign.
 
+Write freely under the wiki root. Under .loop write only the output path, plus append-only additions to the wiki inbox: you may add lines to it but must never rewrite or remove its existing bytes. STATE, PROTOCOL, PLAN, REVIEW-LOG, REQUEST, ASSUMPTIONS, QUESTIONS, the diff, and the builder report are immutable here; any edit to them is restored and costs the round. Never update loop state yourself, even to record a step you completed.
+
+If the brief target does not exist yet, this is a cold project: initialize the wiki, its index, and the first brief. The last non-blank line must be exactly RESULT: PASS or RESULT: FAIL, and a degraded or partial closeout reports FAIL rather than claiming success.
+
 Protocol: {{protocol_path}}
 State: {{state_path}}
 Plan: {{plan_path}}

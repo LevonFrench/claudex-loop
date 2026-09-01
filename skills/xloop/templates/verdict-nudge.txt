@@ -1,4 +1,6 @@
-Your preserved prior output did not satisfy the protocol terminator. Re-read it at the findings path and correct only its final verdict contract. `REVISE` requires at least one blocking finding with a concrete Scenario; otherwise use `APPROVE`. Preserve valid findings and write the corrected complete file to the distinct output path.
+Your preserved prior output did not satisfy the protocol contract. Re-read it at the findings path and correct its complete contents into the required schema, then write that corrected file to the distinct output path. Do not discuss tooling and do not edit STATE or any other loop file.
+
+Every finding ID must be exactly F<round>.<index> or B<round>.<index>; a bare [F5] or any other bracketed pseudo-finding is invalid. Preserve valid findings verbatim. REVISE requires at least one blocking finding with a concrete Scenario line; otherwise use APPROVE, and an APPROVE file must contain no finding or pseudo-finding lines at all. The last non-blank line must be exactly VERDICT: APPROVE, VERDICT: REVISE, RESULT: PASS, or RESULT: FAIL, matching the artifact you were asked to produce.
 
 Round: {{round}}
 Protocol: {{protocol_path}}

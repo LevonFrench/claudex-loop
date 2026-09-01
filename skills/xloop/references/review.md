@@ -12,17 +12,20 @@ Use the fixed templates under `templates/`; render only paths and the round numb
 
 The read budget is the brief, cited articles, and at most five source files needed to verify a specific suspicion. No repository crawl.
 
-Invoke the other agent read-only through the matching wrapper. It writes only `rounds/r<N>-findings.md`. A valid final line is required.
+Render packets with `scripts/loop-render.ps1` and a `key=value` values file under `.loop/tmp`; it fails loudly on a missing or unused token instead of producing a half-substituted prompt.
+
+Invoke the other agent with wrapper `-Sandbox read-only`. That is read intent, not a Codex flag: the wrapper maps it to `workspace-write` on Windows and `read-only` elsewhere, because the Windows read-only sandbox cannot launch the shell it needs to read assigned evidence. Never pass `-Sandbox write` for review. Pass every packet path with `-EvidenceFile` so the wrapper protects it. The reviewer writes only `rounds/r<N>-findings.md`. A valid final line is required.
 
 ## Validate once
 
 Strip a leading BOM before parsing. Enforce the findings schema and caps from protocol §3.3. Drop findings without a concrete `Scenario:` as `void-no-scenario`. Auto-void attacks on settled IDs unless they present a genuinely new concrete scenario.
 
-- `APPROVE` with no surviving findings is valid; an approval containing findings is malformed.
+- `APPROVE` with no surviving findings is valid; an approval containing findings, or a pseudo-finding such as `[F5]`, is malformed.
 - `REVISE` requires at least one surviving `blocking` finding.
-- Missing/malformed verdict or invalid `REVISE` is wrapper exit `2`.
+- Missing/malformed verdict or invalid `REVISE` is wrapper exit `2` with `nudge_class: format`.
+- A restored mutation of a protected `.loop` input is also exit `2`, with `nudge_class: mutation`. The findings file may still be valid; do not discard it silently.
 
-On exit `2`, atomically move the malformed canonical findings file to `.loop/tmp/r<N>-malformed-findings.md`. Render `verdict-nudge.txt` with that preserved path as `findings_path` and the canonical round path as `output_path`, then retry exactly once. The wrapper may delete/recreate only the canonical output; the retry evidence remains readable. A second `2` sets `phase: escalated`. Exit `3` surfaces the timeout without retry. Exit `1` gets a fresh retry only after a read-only resume failure; ambiguous write-mode failures require a HEAD/worktree/report check first. Never substitute self-review.
+On a `format` exit `2`, atomically move the malformed canonical findings file to `.loop/tmp/r<N>-malformed-findings.md`. Render `verdict-nudge.txt` with that preserved path as `findings_path` and the canonical round path as `output_path`, then retry exactly once. The wrapper may delete/recreate only the canonical output; the retry evidence remains readable. On a `mutation` exit `2`, restate the packet mutation policy and retry once. The two classes have independent one-use budgets; a second failure of the same class sets `phase: escalated`. Exit `3` surfaces the timeout without retry. Exit `1` gets a fresh retry only after a read-only resume failure; ambiguous write-mode failures require a HEAD/worktree/report check first. Never substitute self-review.
 
 ## Arbitrate a revise round
 

@@ -1,5 +1,9 @@
 Continue adversarial plan review for the round below. Read the protocol, state, settled ledger, and previous response at these paths. Unchanged plan sections are byte-identical; do not reread the plan. Assess only the complete replacement sections and resulting interactions. Write the required findings schema to the output path, respecting settled IDs.
 
+The repository intentionally does not yet implement this plan; an unimplemented plan step is not a finding. A finding against a settled ID is void unless it supplies a concrete failure scenario not previously raised. Write only your assigned output path: never STATE, PROTOCOL, PLAN, REVIEW-LOG, REQUEST, ASSUMPTIONS, QUESTIONS, or another round's artifact. Any edit to those files is restored and costs the round.
+
+Finding IDs are exactly F<round>.<index>, severity is blocking|major|minor, and every finding needs a concrete Scenario line. The last non-blank line must be exactly VERDICT: APPROVE or VERDICT: REVISE. APPROVE means zero findings and zero finding-shaped lines of any kind. REVISE requires at least one blocking finding with a Scenario. At the final permitted round, report only surviving blocking scenarios introduced by the replacement sections; otherwise approve.
+
 Round: {{round}}
 Protocol: {{protocol_path}}
 State: {{state_path}}

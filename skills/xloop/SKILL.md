@@ -23,9 +23,10 @@ Use files under `<project>/.loop/` as the only shared memory. The agent the user
 
 ## Invariants
 
-- Only the driving agent writes `STATE.md`. Summoned agents write only their assigned output file.
-- Variable prompt content is paths and the round number. Never inline plan, findings, diffs, or wiki articles into a prompt.
-- Use the shipped PowerShell wrappers even from Git Bash. Respect their exit codes: `0` proceed, `2` one verdict nudge then escalate, `3` surface timeout without retry, `1` fresh retry only after a failed resume attempt.
+- Only the driving agent writes `STATE.md`. Summoned agents write only their assigned output file, plus declared append-only paths. Wrappers restore anything else and report it.
+- Variable prompt content is paths and the round number. Never inline plan, findings, diffs, or wiki articles into a prompt. Render packets with `scripts/loop-render.ps1` and advance state with `scripts/loop-step.ps1`; both are clerical helpers that never judge.
+- Use the shipped PowerShell wrappers even from Git Bash. Respect their exit codes: `0` proceed, `2` one nudge for that `nudge_class` then escalate, `3` surface timeout without retry, `1` fresh retry only after a failed resume attempt.
+- Review and inspection use `-Sandbox read-only`. That is read intent; the wrapper picks the platform-correct Codex sandbox. Only the builder uses `-Sandbox write`.
 - Ask user questions in one phase-boundary batch. Persist the batch before displaying it.
 - Never infer approval. Only a validated terminal `VERDICT: APPROVE` approves review or inspection.
 - Never write to `AGENTS.md`, `CLAUDE.md`, tracked `.gitignore`, or global Git configuration.

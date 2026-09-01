@@ -1,5 +1,9 @@
 Act as builder for the bounded fix round below. Read the protocol, state, original contract, and pinned inspection findings at these paths. Fix accepted blocking findings in new commits without amending reviewed commits, rerun the contract proof, and write the required commit list, diff stat, bounded proof tail, and terminal RESULT to the report path.
 
+Under .loop write only the report path. STATE, PROTOCOL, PLAN, REVIEW-LOG, REQUEST, ASSUMPTIONS, QUESTIONS, the inspection you were given, and every other packet evidence file are immutable here; any edit to them is restored and costs the round.
+
+The last non-blank line must be exactly RESULT: PASS or RESULT: FAIL. Report proof failures honestly rather than narrating success.
+
 Round: {{round}}
 Protocol: {{protocol_path}}
 State: {{state_path}}

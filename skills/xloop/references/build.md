@@ -12,7 +12,7 @@ Write `.loop/build/CONTRACT.md` using protocol §3.7. Key paths come from the br
 
 ## Summon the builder
 
-When `build_step: summon`, render `templates/build.txt` with paths only and invoke the reviewer agent in write mode. Try its review session/thread first because it already knows the plan. If sandbox switching or resume fails, retry fresh with the same self-sufficient packet and log the fallback.
+When `build_step: summon`, render `templates/build.txt` with paths only and invoke the reviewer agent in write mode. Pass the contract, plan, and brief with `-EvidenceFile`; the builder may change repository source but the immutable core and packet evidence stay protected. Inspection is a read-intent summon: pass `-Sandbox read-only` plus the diff and report as `-EvidenceFile` so the pinned evidence cannot move under the inspector. Try its review session/thread first because it already knows the plan. If sandbox switching or resume fails, retry fresh with the same self-sufficient packet and log the fallback.
 
 The builder makes small commits, runs the proof, and writes `build/b<N>-report.md` with commit list, diff stat, at most 50 proof-tail lines, and final `RESULT: PASS|FAIL`. The builder must not write state or inspection files. After validating the report, the driver atomically sets `build_step: pin`; STATE is updated last.
 

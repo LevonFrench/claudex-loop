@@ -35,6 +35,8 @@ When the repository is indexed, prefer bounded `codebase-memory` graph queries t
 
 ## No-wiki mode
 
+When there is no resolvable brief, record `brief` as the intended target path and treat every packet's brief slot as the literal text `(none - use PLAN section E and the contract key paths)`. A summon must never receive an empty or dangling brief path with no explanation.
+
 Inspect entry points, build files, and the target subtree. Do not crawl the entire repository. The default cap is 15 files; exceeding it requires one user decision at the next boundary. Record that closeout must initialize the wiki and brief.
 
 Do not spawn research agents. If a genuine external research gap blocks planning, add a `wiki:research` recommendation to the boundary question batch.
