@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  ClaudeAdapter,
   SessionManager,
   StructuredAdapter,
   claudeArguments,
@@ -59,7 +60,7 @@ test('different named sessions run concurrently while each session serializes tu
   const a = sessions.request(first.handle, 'slow', { timeoutMs: 1000 });
   const b = sessions.request(second.handle, 'slow', { timeoutMs: 1000 });
   await Promise.all([a, b]);
-  assert.ok(Date.now() - started < 150, 'sessions should overlap rather than run globally in series');
+  assert.ok(Date.now() - started < 1000, 'both turns finished within their budgets (overlap is asserted separately)');
 
   const one = sessions.get(first.handle);
   await Promise.all([
@@ -238,7 +239,7 @@ test('real structured child exit rejects a pending protocol request', async () =
   };
   const fixture = fileURLToPath(new URL('../fixtures/crash-provider.mjs', import.meta.url));
   const adapter = new StructuredAdapter(session, process.execPath, [fixture]);
-  await assert.rejects(() => adapter.request('never-completes', {}), /process exited before completing/);
+  await assert.rejects(() => adapter.request('never-completes', {}), /process exited \(code 7\) before completing/);
   assert.equal(session.status, 'exited');
   assert.match(output.join(''), /process exited \(7/);
 });
@@ -254,4 +255,145 @@ test('viewer acknowledgement fails closed and accepts only a matching delayed ac
   } finally {
     await fs.promises.rm(directory, { recursive: true, force: true });
   }
+});
+
+test('sending to a stopped or starting peer is rejected instead of silently accepted', async () => {
+  const sessions = manager();
+  const peer = await sessions.launch({ name: 'stopped', provider: 'claude', visible: false });
+  await sessions.stop(peer.handle);
+  await assert.rejects(() => sessions.send(peer.handle, 'hello'), /not running \(status: exited\)/);
+  await assert.rejects(() => sessions.request(peer.handle, 'hello', { timeoutMs: 1000 }), /not running/);
+  const status = sessions.status(peer.handle);
+  assert.equal(status.busy, false);
+  assert.equal('exitCode' in status, true, 'exited sessions expose their exit code');
+});
+
+test('status reports busy while a turn is queued or executing', async () => {
+  const sessions = manager();
+  const peer = await sessions.launch({ name: 'busy-flag', provider: 'claude', visible: false });
+  assert.equal(sessions.status(peer.handle).busy, false);
+  const pending = sessions.request(peer.handle, 'slow', { timeoutMs: 1000 });
+  assert.equal(sessions.status(peer.handle).busy, true);
+  assert.equal(sessions.status(peer.handle).queuedTurns, 1);
+  await pending;
+  assert.equal(sessions.status(peer.handle).busy, false);
+});
+
+test('a request that times out while still queued is withdrawn without stopping the peer', async () => {
+  const sessions = new SessionManager({
+    resolveExecutable: async () => process.execPath,
+    adapterFactory: (session) => new FakeAdapter(session, { slow: 1500, fast: 10 })
+  });
+  const peer = await sessions.launch({ name: 'queued-timeout', provider: 'claude', visible: false });
+  const long = sessions.request(peer.handle, 'slow', { timeoutMs: 5000 });
+  const impatient = await sessions.request(peer.handle, 'fast', { timeoutMs: 1000 });
+  assert.equal(impatient.timedOut, true);
+  assert.equal(impatient.stopped, false, 'a queued request must not kill another caller\'s turn');
+  const first = await long;
+  assert.equal(first.timedOut, false);
+  assert.match(first.text, /slow:done/);
+  assert.equal(sessions.status(peer.handle).status, 'running');
+  assert.doesNotMatch(sessions.read(peer.handle, 0).text, /fast:done/, 'the withdrawn turn must never run');
+});
+
+test('a request that times out while executing stops the peer and says so', async () => {
+  const sessions = manager();
+  const peer = await sessions.launch({ name: 'executing-timeout', provider: 'claude', visible: false });
+  const timed = await sessions.request(peer.handle, 'hang', { timeoutMs: 1000 });
+  assert.equal(timed.timedOut, true);
+  assert.equal(timed.stopped, true);
+  assert.equal(sessions.status(peer.handle).status, 'exited');
+});
+
+test('request output starts at the turn, not at enqueue time, and honors maxChars', async () => {
+  const sessions = manager();
+  const peer = await sessions.launch({ name: 'scoped-output', provider: 'claude', visible: false });
+  const first = sessions.request(peer.handle, 'slow', { timeoutMs: 2000 });
+  const second = sessions.request(peer.handle, 'fast', { timeoutMs: 2000 });
+  const [a, b] = await Promise.all([first, second]);
+  assert.match(a.text, /slow:done/);
+  assert.doesNotMatch(b.text, /slow:done/, 'a queued request must not receive the previous turn\'s output');
+  assert.match(b.text, /fast:done/);
+  const paged = await sessions.request(peer.handle, 'x'.repeat(20000), { timeoutMs: 2000, maxChars: 4096 });
+  assert.ok(paged.text.length <= 4096);
+  assert.equal(paged.hasMore, true);
+});
+
+test('truncated reports eviction exactly at the boundary', async () => {
+  const sessions = manager();
+  const peer = await sessions.launch({ name: 'boundary', provider: 'claude', visible: false });
+  const session = sessions.get(peer.handle);
+  session.append('B'.repeat(1024 * 1024 + 8192));
+  assert.ok(session.firstCursor > 1, 'the ring must have evicted the earliest chunks');
+  assert.equal(sessions.read(peer.handle, 0).truncated, true, 'a fresh reader has lost the beginning');
+  assert.equal(sessions.read(peer.handle, session.firstCursor - 1).truncated, false, 'the next needed chunk is still retained');
+  assert.equal(sessions.read(peer.handle, session.firstCursor - 2).truncated, true);
+  const page = sessions.read(peer.handle, session.firstCursor - 1, 4096);
+  assert.equal(page.hasMore, true);
+});
+
+test('a stop that cannot terminate the process tree restores the session state', async () => {
+  class StubbornAdapter {
+    constructor(session) { session.pid = 4343; }
+    async initialize() {}
+    async sendTurn() {}
+    async stop() { throw new Error('taskkill denied'); }
+  }
+  const sessions = new SessionManager({
+    resolveExecutable: async () => process.execPath,
+    adapterFactory: (session) => new StubbornAdapter(session)
+  });
+  const peer = await sessions.launch({ name: 'stubborn', provider: 'claude', visible: false });
+  await assert.rejects(() => sessions.stop(peer.handle), /could not be stopped: taskkill denied/);
+  assert.equal(sessions.status(peer.handle).status, 'running', 'the session must not be stuck in stopping');
+  await assert.rejects(() => sessions.launch({ name: 'stubborn', provider: 'claude', visible: false }), /already uses/);
+});
+
+test('a Claude child that exits mid-turn rejects the pending turn immediately', async () => {
+  const output = [];
+  const session = {
+    provider: 'claude', cwd: process.cwd(), status: 'running', pid: null, name: 'claude-exit',
+    append: (text) => output.push(String(text))
+  };
+  const fixture = fileURLToPath(new URL('../fixtures/crash-provider.mjs', import.meta.url));
+  const adapter = new ClaudeAdapter(session, process.execPath, { access: 'read' });
+  // Replace the spawned CLI with the crash fixture so the test needs no Claude install.
+  adapter.child.kill();
+  await new Promise((resolve) => adapter.child.once('exit', resolve));
+  const real = new StructuredAdapter(session, process.execPath, [fixture]);
+  adapter.child = real.child;
+  adapter.turns = real.turns;
+  adapter.rpc = real.rpc;
+  real.rejectPending = (error) => adapter.rejectPending(error);
+  const started = Date.now();
+  await assert.rejects(() => adapter.sendTurn('never-completes'), /process exited \(code 7\)/);
+  assert.ok(Date.now() - started < 5000, 'the turn must settle on exit rather than waiting for a timeout');
+  assert.equal(adapter.pendingTurn, null);
+});
+
+test('cross-session concurrency is proven by overlap, not by wall-clock luck', async () => {
+  let active = 0;
+  let maxActive = 0;
+  class OverlapAdapter {
+    constructor(session) { this.session = session; session.pid = 77; }
+    async initialize() {}
+    async sendTurn() {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      active -= 1;
+    }
+    stop() { this.session.status = 'exited'; }
+  }
+  const sessions = new SessionManager({
+    resolveExecutable: async () => process.execPath,
+    adapterFactory: (session) => new OverlapAdapter(session)
+  });
+  const one = await sessions.launch({ name: 'overlap-one', provider: 'claude', visible: false });
+  const two = await sessions.launch({ name: 'overlap-two', provider: 'codex', visible: false });
+  await Promise.all([
+    sessions.request(one.handle, 'go', { timeoutMs: 2000 }),
+    sessions.request(two.handle, 'go', { timeoutMs: 2000 })
+  ]);
+  assert.equal(maxActive, 2, 'two sessions must execute their turns at the same time');
 });

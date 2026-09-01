@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// One source of truth for the plugin version: package.json. validate.mjs asserts the manifests agree.
+export const PLUGIN_VERSION = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8')).version;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_FRAME_BYTES = 1024 * 1024;
 export const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -71,10 +73,20 @@ export function requireText(value) {
   return value;
 }
 
+// Peer output is untrusted and is echoed into consoles and MCP text results, so every
+// terminal control family is removed, not only colors: OSC, DCS/SOS/PM/APC strings,
+// CSI sequences, remaining two-byte and nF escapes (for example ESC c full reset),
+// 8-bit C1 controls, and C0 controls other than tab, newline, and carriage return.
 export function stripAnsi(value) {
   return String(value)
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b[PX^_][\s\S]*?(?:\u001b\\|\u0007)/g, '')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b[ -/]*[0-~]/g, '')
+    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\u0090\u0098\u009d\u009e\u009f][\s\S]*?(?:\u009c|\u0007)/g, '')
+    .replace(/[\u0080-\u009f]/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .replace(/\r(?!\n)/g, '\n');
 }
 

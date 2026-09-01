@@ -5,6 +5,8 @@ import process from 'node:process';
 import { SessionManager } from './session-manager.mjs';
 import {
   MAX_FRAME_BYTES,
+  PLUGIN_ROOT,
+  PLUGIN_VERSION,
   ensurePrivateDirectory,
   makeEndpoint,
   runtimePaths,
@@ -51,8 +53,10 @@ async function createLockLease() {
   const writeRecord = async () => {
     record.heartbeatAt = Date.now();
     const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
-    await handle.truncate(0);
+    // Overwrite in place and trim afterwards so a concurrent reader never sees an
+    // empty file between truncate and write.
     await handle.write(bytes, 0, bytes.length, 0);
+    await handle.truncate(bytes.length);
     await handle.sync();
   };
   await writeRecord();
@@ -66,6 +70,9 @@ async function createLockLease() {
   return {
     handle,
     nonce: record.nonce,
+    // Serialize reads behind the heartbeat writes so the owner's own check never
+    // races a heartbeat in flight.
+    settled() { return writes; },
     async stop() {
       clearInterval(timer);
       await writes;
@@ -85,8 +92,10 @@ async function readLockState(file = paths.lock) {
 }
 
 async function ownsLock(lock) {
-  try { return (await readLockState()).record?.nonce === lock.nonce; }
-  catch { return false; }
+  try {
+    await lock.settled?.();
+    return (await readLockState()).record?.nonce === lock.nonce;
+  } catch { return false; }
 }
 
 async function acquireLock() {
@@ -138,6 +147,12 @@ const endpoint = makeEndpoint(token);
 const manager = new SessionManager();
 const server = net.createServer((socket) => {
   socket.setEncoding('utf8');
+  // A client that gives up (timeout, cancellation, host exit, closed viewer window)
+  // must not take the shared broker and every peer session down with it.
+  socket.on('error', () => socket.destroy());
+  const respond = (payload) => {
+    if (!socket.destroyed && socket.writable) socket.end(`${JSON.stringify(payload)}\n`);
+  };
   let buffer = '';
   socket.on('data', async (chunk) => {
     buffer += chunk;
@@ -153,18 +168,25 @@ const server = net.createServer((socket) => {
       const request = JSON.parse(line);
       if (!safeEqual(request.token, token)) throw new Error('Unauthorized broker client.');
       const result = await dispatch(request.action, request.params || {});
-      socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      respond({ id: request.id, ok: true, result });
     } catch (error) {
-      socket.end(`${JSON.stringify({ ok: false, error: String(error.message || error).slice(0, 500) })}\n`);
+      respond({ ok: false, error: String(error.message || error).slice(0, 500) });
     }
   });
 });
 
+function requireCwd(params) {
+  if (typeof params.cwd !== 'string' || !params.cwd.trim()) {
+    throw new Error('Session cwd is required. Pass the project directory the peer should work in.');
+  }
+  return params;
+}
+
 async function dispatch(action, params) {
   switch (action) {
-    case 'ping': return { pid: process.pid, version: '0.1.0' };
-    case 'launch': return manager.launch({ ...params, access: 'read' });
-    case 'launchWrite': return manager.launch({ ...params, access: 'write' });
+    case 'ping': return { pid: process.pid, version: PLUGIN_VERSION, root: PLUGIN_ROOT };
+    case 'launch': return manager.launch({ ...requireCwd(params), access: 'read' });
+    case 'launchWrite': return manager.launch({ ...requireCwd(params), access: 'write' });
     case 'list': return manager.list();
     case 'resolve': return manager.resolve(params.name);
     case 'send': return manager.send(params.handle, params.text, params);

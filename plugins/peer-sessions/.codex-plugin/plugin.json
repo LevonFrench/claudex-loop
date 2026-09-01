@@ -1,6 +1,6 @@
 {
   "name": "peer-sessions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run and address multiple persistent Claude and Codex sessions through one local MCP broker.",
   "author": {
     "name": "LevonFrench",

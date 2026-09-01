@@ -8,6 +8,7 @@ import {
   MAX_OUTPUT_BYTES,
   MAX_SESSIONS,
   PLUGIN_ROOT,
+  PLUGIN_VERSION,
   ensurePrivateDirectory,
   normalizeLabel,
   requireText,
@@ -151,6 +152,20 @@ export async function prepareCodexHome(handle, options = {}) {
   return home;
 }
 
+async function realpathOrSelf(target) {
+  try { return await fs.promises.realpath(target); }
+  catch { return path.resolve(target); }
+}
+
+function isInside(candidate, root) {
+  const relative = path.relative(root, candidate);
+  if (relative === '') return true;
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  return process.platform === 'win32'
+    ? candidate.toLowerCase().startsWith(root.toLowerCase())
+    : candidate.startsWith(root);
+}
+
 export async function terminateProcessTree(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Process PID must be a positive integer.');
   if (process.platform === 'win32') {
@@ -212,12 +227,17 @@ export class StructuredAdapter {
       stdio: ['pipe', 'pipe', 'pipe']
     });
     session.pid = this.child.pid;
+    this.watchdog = null;
     if (process.platform === 'win32' && this.child.pid) {
       const watchdogPath = path.join(PLUGIN_ROOT, 'server', 'watchdog.mjs');
-      const watchdog = spawn(process.execPath, [watchdogPath, String(process.pid), String(this.child.pid)], {
-        detached: true, windowsHide: true, stdio: 'ignore', env: providerEnvironment(), cwd: PLUGIN_ROOT
+      // The watchdog holds a pipe from this process: EOF means the broker died and the
+      // provider tree must go; an explicit release means the provider ended normally.
+      this.watchdog = spawn(process.execPath, [watchdogPath, String(process.pid), String(this.child.pid)], {
+        detached: true, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'], env: providerEnvironment(), cwd: PLUGIN_ROOT
       });
-      watchdog.unref();
+      this.watchdog.stdin.on('error', () => {});
+      this.watchdog.on('error', () => {});
+      this.watchdog.unref();
     }
     this.child.stdout.setEncoding('utf8');
     this.child.stderr.setEncoding('utf8');
@@ -226,18 +246,36 @@ export class StructuredAdapter {
     this.child.stderr.on('data', (text) => {
       session.lastStderr = `${session.lastStderr || ''}${text}`.slice(-8192);
     });
+    // A provider that dies between the writability check and the write emits EPIPE on
+    // stdin; without a listener that becomes an uncaught exception in the broker.
+    this.child.stdin.on('error', (error) => {
+      session.append(`[peer-sessions] input error: ${error.message}\r\n`);
+      this.rejectPending(new Error(`${session.provider} input stream failed: ${error.message}`));
+    });
     this.child.on('exit', (code, signal) => {
       session.status = 'exited';
       session.exitCode = code;
       session.append(`\r\n[peer-sessions] process exited (${code}${signal ? `, signal ${signal}` : ''})\r\n`);
-      const error = new Error(`${session.provider} process exited before completing the turn.`);
-      for (const pending of this.rpc.values()) pending.reject(error);
-      for (const pending of this.turns.values()) pending.reject(error);
-      this.rpc.clear();
-      this.turns.clear();
+      const stderrTail = (session.lastStderr || '').trim().slice(-500);
+      this.rejectPending(new Error(`${session.provider} process exited (code ${code}) before completing the turn.${stderrTail ? ` stderr: ${stderrTail}` : ''}`));
+      this.releaseWatchdog();
       session.onExit?.();
     });
     this.child.on('error', (error) => session.append(`[peer-sessions] process error: ${error.message}\r\n`));
+  }
+
+  releaseWatchdog() {
+    const watchdog = this.watchdog;
+    this.watchdog = null;
+    if (!watchdog) return;
+    try { watchdog.stdin.end('released\n'); } catch { /* The watchdog may already be gone. */ }
+  }
+
+  rejectPending(error) {
+    for (const pending of this.rpc.values()) pending.reject(error);
+    for (const pending of this.turns.values()) pending.reject(error);
+    this.rpc.clear();
+    this.turns.clear();
   }
 
   write(value) {
@@ -273,7 +311,7 @@ export class StructuredAdapter {
   }
 }
 
-class ClaudeAdapter extends StructuredAdapter {
+export class ClaudeAdapter extends StructuredAdapter {
   constructor(session, executable, options) {
     const args = claudeArguments(session, options);
     super(session, executable, args);
@@ -300,6 +338,15 @@ class ClaudeAdapter extends StructuredAdapter {
       if (message.is_error) pending.reject(new Error(message.result || 'Claude turn failed.'));
       else pending.resolve(message);
     }
+  }
+
+  rejectPending(error) {
+    // Claude tracks its single in-flight turn outside the id-keyed maps; a child exit
+    // must settle it too, otherwise the caller waits for the full request timeout.
+    const pending = this.pendingTurn;
+    this.pendingTurn = null;
+    pending?.reject(error);
+    super.rejectPending(error);
   }
 
   sendTurn(text) {
@@ -338,7 +385,7 @@ class CodexAdapter extends StructuredAdapter {
 
   async initialize() {
     await this.request('initialize', {
-      clientInfo: { name: 'peer_sessions', title: 'Peer Sessions', version: '0.1.0' }
+      clientInfo: { name: 'peer_sessions', title: 'Peer Sessions', version: PLUGIN_VERSION }
     });
     this.notify('initialized');
     const result = await this.request('thread/start', {
@@ -473,6 +520,11 @@ export class SessionManager {
       const requestedCwd = path.resolve(input.cwd || process.cwd());
       if (!(await fs.promises.stat(requestedCwd)).isDirectory()) throw new Error('Session cwd must be an existing directory.');
       const cwd = await fs.promises.realpath(requestedCwd);
+      // The runtime root holds the broker token and Codex authentication links; a peer
+      // whose read boundary starts there could hand them back to any caller.
+      if (isInside(cwd, await realpathOrSelf(runtimePaths().root))) {
+        throw new Error('Session cwd must not be inside the Peer Sessions runtime directory.');
+      }
       const executable = await this.resolveExecutable(provider);
       const now = Date.now();
       session = {
@@ -554,19 +606,33 @@ export class SessionManager {
     const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     const script = path.join(PLUGIN_ROOT, 'scripts', 'open-viewer.ps1');
     const viewer = path.join(PLUGIN_ROOT, 'server', 'viewer-rpc.mjs');
+    // The viewer chain (cmd -> powershell -> node viewer-rpc) gets the same scrubbed
+    // environment as providers, plus the runtime override so a development broker's
+    // viewers talk to that broker. Host NODE_OPTIONS or similar must not reach it.
+    const viewerEnvironment = providerEnvironment();
+    for (const name of ['PEER_SESSIONS_HOME', 'PEER_SESSIONS_ALLOW_CUSTOM_HOME']) {
+      if (process.env[name] !== undefined) viewerEnvironment[name] = process.env[name];
+    }
     const child = spawn(command, [
       '/d', '/s', '/c', 'start', 'Peer Sessions', '/wait', powershell,
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
       '-NodePath', process.execPath, '-ViewerPath', viewer, '-HandoffPath', handoff
-    ], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], cwd: PLUGIN_ROOT });
+    ], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], cwd: PLUGIN_ROOT, env: viewerEnvironment });
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     const launcherExit = new Promise((resolve, reject) => {
       child.once('error', reject);
-      child.once('exit', (code) => reject(new Error(
-        `Viewer launcher exited before acknowledgement with code ${code}: ${stderr.slice(0, 500)}`
-      )));
+      child.once('exit', async (code) => {
+        // The PowerShell window writes its failure reason to the error sidecar and closes
+        // immediately; read it here so the reason survives the race with the ack poll.
+        let message = '';
+        try { message = (await fs.promises.readFile(errorPath, 'utf8')).trim().slice(0, 300); }
+        catch { /* No sidecar: the launcher failed before the script ran. */ }
+        reject(new Error(message
+          ? `Visible viewer failed before acknowledgement: ${message}`
+          : `Viewer launcher exited before acknowledgement with code ${code}: ${stderr.slice(0, 500)}`));
+      });
     });
     try {
       const ack = await Promise.race([
@@ -632,21 +698,31 @@ export class SessionManager {
     return session;
   }
 
-  enqueueTurn(session, text) {
+  enqueueTurn(session, text, hooks = {}) {
     const payload = requireText(text);
+    // Reject synchronously so peer_send cannot report an accepted turn for a peer that
+    // is not running; the in-queue check below still covers a peer that exits later.
+    if (session.status !== 'running') {
+      throw new Error(`Session '${session.name}' is not running (status: ${session.status}). Launch a new peer.`);
+    }
     if (session.queuedTurns >= 8) throw new Error(`Session '${session.name}' already has 8 queued turns.`);
     session.queuedTurns += 1;
+    const state = { started: false, withdrawn: false };
     const task = session.queue.then(() => {
+      if (state.withdrawn) throw new Error('Peer turn was withdrawn before it started.');
       if (session.status !== 'running') throw new Error(`Session '${session.name}' is not running.`);
+      state.started = true;
+      hooks.onStart?.();
       return session.adapter.sendTurn(payload);
     }).finally(() => { session.queuedTurns -= 1; });
     session.queue = task.catch(() => {});
-    return task;
+    return { task, state };
   }
 
   async send(handle, text) {
     const session = this.get(handle);
-    this.enqueueTurn(session, text).catch((error) => session.append(`[peer-sessions] turn failed: ${error.message}\r\n`));
+    const { task } = this.enqueueTurn(session, text);
+    task.catch((error) => session.append(`[peer-sessions] turn failed: ${error.message}\r\n`));
     return { accepted: true, handle: session.handle, cursor: session.cursor };
   }
 
@@ -665,44 +741,63 @@ export class SessionManager {
     return {
       handle: session.handle, name: session.name, status: session.status,
       cursor: nextCursor, latestCursor: session.cursor,
-      truncated: numericCursor > 0 && numericCursor < session.firstCursor,
+      hasMore: nextCursor < session.cursor,
+      // The caller's cursor names the last chunk it has; data is lost only when the
+      // next chunk it needs (cursor + 1) has already been evicted from the ring.
+      truncated: numericCursor + 1 < session.firstCursor,
       text: stripAnsi(text)
     };
   }
 
   async request(handle, text, options = {}) {
     const session = this.get(handle);
-    const startCursor = session.cursor;
+    let startCursor = session.cursor;
     const timeoutMs = Math.max(1000, Math.min(Number(options.timeoutMs) || 120000, 600000));
+    const maxChars = Number(options.maxChars) || 65536;
+    const { task, state } = this.enqueueTurn(session, text, { onStart: () => { startCursor = session.cursor; } });
+    task.catch(() => {});
     let timer;
     try {
       await Promise.race([
-        this.enqueueTurn(session, text),
+        task,
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Peer turn timed out.')), timeoutMs); })
       ]);
-      return { timedOut: false, ...this.read(handle, startCursor, 262144) };
+      return { timedOut: false, stopped: false, ...this.read(handle, startCursor, maxChars) };
     } catch (error) {
-      if (error.message === 'Peer turn timed out.') {
-        session.status = 'stopping';
-        await session.adapter.stop();
-        if (session.status === 'stopping') session.status = 'exited';
-        await this.cleanupCodexHome(session);
-        return { timedOut: true, ...this.read(handle, startCursor, 262144) };
+      if (error.message !== 'Peer turn timed out.') throw error;
+      if (!state.started) {
+        // Still waiting behind other turns: withdraw this request and leave the peer
+        // and the other callers' work alone.
+        state.withdrawn = true;
+        return { timedOut: true, stopped: false, ...this.read(handle, startCursor, maxChars) };
       }
-      throw error;
+      await this.terminate(session);
+      return { timedOut: true, stopped: true, ...this.read(handle, startCursor, maxChars) };
     } finally {
       clearTimeout(timer);
     }
   }
 
+  // Stop a provider without leaving the session stuck in 'stopping' when the process
+  // tree cannot be terminated: the previous status is restored and the error surfaces.
+  async terminate(session) {
+    if (session.status === 'exited' || !session.adapter) return;
+    const previous = session.status;
+    session.status = 'stopping';
+    try {
+      await session.adapter.stop();
+    } catch (error) {
+      if (session.status === 'stopping') session.status = previous;
+      throw new Error(`Session '${session.name}' could not be stopped: ${error.message}`);
+    }
+    if (session.status === 'stopping') session.status = 'exited';
+    session.adapter.releaseWatchdog?.();
+    await this.cleanupCodexHome(session);
+  }
+
   async stop(handle) {
     const session = this.get(handle);
-    if (session.status !== 'exited' && session.adapter) {
-      session.status = 'stopping';
-      await session.adapter.stop();
-      session.status = 'exited';
-      await this.cleanupCodexHome(session);
-    }
+    await this.terminate(session);
     return this.describe(session);
   }
 
@@ -735,11 +830,18 @@ export class SessionManager {
   }
 
   describe(session) {
-    return {
+    const description = {
       handle: session.handle, name: session.name, provider: session.provider,
       access: session.access, status: session.status,
-      createdAt: new Date(session.createdAt).toISOString(), cursor: session.cursor
+      createdAt: new Date(session.createdAt).toISOString(), cursor: session.cursor,
+      busy: session.queuedTurns > 0, queuedTurns: session.queuedTurns,
+      lastOutputAt: new Date(session.lastOutputAt).toISOString()
     };
+    if (session.status === 'exited') {
+      description.exitCode = session.exitCode;
+      description.lastStderr = (session.lastStderr || '').trim().slice(-500);
+    }
+    return description;
   }
 
   async shutdown() {

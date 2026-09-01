@@ -72,6 +72,35 @@ test('live singleton wins and stale lock recovery verifies endpoint rather than 
   }
 });
 
+test('a client that disconnects mid-request does not take the broker down', async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'peer-sessions-epipe-'));
+  const env = { ...process.env, PEER_SESSIONS_HOME: directory, PEER_SESSIONS_ALLOW_CUSTOM_HOME: '1' };
+  const child = spawn(process.execPath, [daemon], { env, stdio: 'ignore' });
+  try {
+    const runtime = await waitForRuntime(directory);
+    for (let round = 0; round < 3; round += 1) {
+      await new Promise((resolve) => {
+        const socket = net.createConnection(runtime.endpoint);
+        socket.on('connect', () => {
+          socket.write(`${JSON.stringify({ id: 'abandon', token: runtime.token, action: 'list', params: {} })}\n`);
+          socket.destroy();
+          resolve();
+        });
+        socket.on('error', resolve);
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(child.exitCode, null, 'the broker must survive abandoned client sockets');
+    const pong = await ping(runtime);
+    assert.equal(pong.ok, true);
+    assert.match(String(pong.result.version), /^\d+\.\d+\.\d+$/, 'ping must report the plugin version for upgrade detection');
+  } finally {
+    child.kill();
+    await waitExit(child);
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('simultaneous cold starts leave exactly one reachable broker', async () => {
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'peer-sessions-cold-start-'));
   const env = { ...process.env, PEER_SESSIONS_HOME: directory, PEER_SESSIONS_ALLOW_CUSTOM_HOME: '1' };

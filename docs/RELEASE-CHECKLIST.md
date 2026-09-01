@@ -16,7 +16,10 @@
 
 ## Peer Sessions plugin
 
-- [ ] Run `npm test`, `npm run test:tree`, `npm run smoke:claude-isolation`, `npm run smoke:codex-isolation`, `npm run validate`, and `npm run pack` from `plugins/peer-sessions`.
+- [ ] Run `npm test`, `npm run test:tree`, `npm run smoke:claude-isolation`, `npm run smoke:codex-isolation`, `npm run validate`, and `npm run pack` from `plugins/peer-sessions`. `npm test` includes the MCP result-contract conformance check for every tool.
+- [ ] Bump the version in `package.json`, `package-lock.json`, both plugin manifests, and `manifest.json` together; `npm run validate` fails on any mismatch. Regenerate the `manifest.json` tool list from `server/tools.mjs` when a tool description changes.
+- [ ] Run `npm run doctor` and confirm the broker reports the same version as the package; an idle older broker is replaced automatically.
+- [ ] Call `peer_list` from a fresh Claude Code session against the installed plugin and confirm it returns without a schema-validation error.
 - [ ] Validate the Codex plugin directory and the Claude Desktop MCPB manifest.
 - [ ] Run the concurrent visible smoke and same-process persistence smoke on Windows.
 - [ ] Close both viewers, reopen them with `peer_view`, and confirm provider PIDs and conversation identities remain unchanged.

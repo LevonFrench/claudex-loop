@@ -76,7 +76,7 @@ claude plugin marketplace add LevonFrench/claudex-loop
 claude plugin install peer-sessions@claudex-loop-custom
 ```
 
-Restart the desktop app or open a new CLI session after installation. Regular Claude Desktop users can instead install the release asset `peer-sessions-0.1.0.mcpb`.
+Restart the desktop app or open a new CLI session after installation. Regular Claude Desktop users can instead install the release asset `peer-sessions-0.1.1.mcpb`.
 
 ## Use
 

@@ -5,7 +5,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $pluginRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (-not $OutputPath) { $OutputPath = Join-Path $pluginRoot 'dist\peer-sessions-0.1.0.mcpb' }
+$version = (Get-Content -LiteralPath (Join-Path $pluginRoot 'manifest.json') -Raw | ConvertFrom-Json).version
+if (-not $OutputPath) { $OutputPath = Join-Path $pluginRoot "dist\peer-sessions-$version.mcpb" }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $distRoot = [IO.Path]::GetFullPath((Join-Path $pluginRoot 'dist')).TrimEnd('\') + '\'
 if (-not $output.StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) {

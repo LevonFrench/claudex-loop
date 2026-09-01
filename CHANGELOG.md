@@ -4,6 +4,23 @@ All notable changes to this custom fork are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Peer Sessions 0.1.1: `peer_list` returned an array as `structuredContent`, which spec-compliant MCP hosts such as Claude Code reject; every tool result is now an object mirrored by its text content, verified by a conformance test that drives all ten tools through `tools/call`.
+- Peer Sessions 0.1.1: an abandoned client connection (timeout, cancellation, host exit, closed viewer) crashed the broker and every peer with an unhandled `EPIPE`; a provider dying between a writability check and a write could do the same. Both are now handled locally.
+- Peer Sessions 0.1.1: a Claude peer that exited mid-turn left the caller waiting for the full request timeout; the turn is now rejected immediately with the exit code and stderr tail.
+- Peer Sessions 0.1.1: `peer_send` reported `accepted: true` for stopped peers; a request timing out while queued behind another caller's turn killed that turn; `truncated` was off by one in both directions; a stop whose `taskkill` failed left the session stuck in `stopping`.
+- Peer Sessions 0.1.1: the stdio server echoed any requested protocol version, silently dropped JSON-RPC batches, and answered unknown methods and tools with `-32603` instead of `-32601`/`-32602`; `notifications/cancelled` and stdin EOF now abort in-flight broker requests.
+- Peer Sessions 0.1.1: launches without `cwd` landed peers in the broker's own plugin directory instead of the documented host working directory; the runtime directory is refused as a `cwd`.
+- Peer Sessions 0.1.1: viewer consoles decoded UTF-8 output with the OEM code page, threw on any provider stderr line under Windows PowerShell 5.1, inherited the host environment, and could lose their failure reason to a race with the launcher exit.
+- Peer Sessions 0.1.1: the lock heartbeat briefly left the lease file empty; `.mcpbignore` let the official `mcpb pack` ship development files; the version string was hardcoded in four places.
+
+### Changed
+
+- Peer Sessions 0.1.1: clients detect a broker started from a different plugin version, restart it when idle, and report it when busy; the daemon's stderr is kept in `broker.log` under the protected runtime directory; only idempotent actions are retried against a restarted broker.
+- Peer Sessions 0.1.1: `peer_status` reports `busy`, `queuedTurns`, `lastOutputAt`, `exitCode`, and a stderr tail; `peer_read` reports `hasMore`; `peer_request` accepts `maxChars` and reports `stopped`; every tool description states its contract, including the timeout semantics and the 65536-byte message limit.
+- Peer Sessions 0.1.1: the provider watchdog holds a pipe from the broker and is released when a provider ends normally, so a recycled PID is never terminated; viewers never start a broker; all terminal control families are stripped from peer output; the MCPB manifest lists its tools and the validator cross-checks them against the server.
+
 ### Added
 
 - `peer-sessions` v0.1, an optional Windows-local MCP broker shared by Codex and Claude clients. It supports up to 32 concurrent named provider sessions, per-session serialization, cross-session concurrency, bounded memory-only output, visible detachable viewers, opaque routing handles, and fixed read/write access mappings enforced at the broker boundary.

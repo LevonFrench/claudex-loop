@@ -1,8 +1,19 @@
+# Mirrors the allowlist in scripts/pack-mcpb.ps1 so the official `mcpb pack` produces the
+# same inventory: manifest.json, package.json, README.md, SCOPE.md, .mcp.json, server/,
+# skills/, scripts/open-viewer.ps1, scripts/set-private-acl.ps1. validate.mjs checks both.
 .git/
 .codex-plugin/
 .claude-plugin/
+.mcpbignore
 mcp/
 test/
+fixtures/
+dist/
+assets/
 node_modules/
 package-lock.json
+ACCEPTANCE.md
+scripts/*.mjs
+scripts/support/
+scripts/pack-mcpb.ps1
 *.mcpb

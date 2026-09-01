@@ -26,11 +26,12 @@ for (const command of ['claude', 'codex']) {
 try {
   await ensureBroker();
   const ping = await brokerRequest('ping');
-  check('local broker', Boolean(ping.pid), `pid ${ping.pid}`);
+  check('local broker', Boolean(ping.pid), `pid ${ping.pid}, version ${ping.version || 'unknown'}`);
 } catch (error) {
   check('local broker', false, error.message);
 }
 
 for (const item of checks) process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'}  ${item.name}: ${item.detail}\n`);
 process.stdout.write(`Runtime state: ${runtimePaths().runtime}\n`);
+process.stdout.write(`Broker log: ${path.join(runtimePaths().root, 'broker.log')}\n`);
 if (checks.some((item) => !item.ok)) process.exitCode = 1;

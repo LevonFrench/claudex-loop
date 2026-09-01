@@ -39,7 +39,12 @@ export class McpClient {
   async callTool(name, args = {}) {
     const response = await this.request('tools/call', { name, arguments: args });
     if (response.isError) throw new Error(response.content?.[0]?.text || `${name} failed.`);
-    return response.structuredContent;
+    // Mirror what a spec-compliant MCP host validates: structuredContent must be a JSON object.
+    const structured = response.structuredContent;
+    if (structured === null || typeof structured !== 'object' || Array.isArray(structured)) {
+      throw new Error(`${name} returned non-object structuredContent (${Array.isArray(structured) ? 'array' : typeof structured}).`);
+    }
+    return structured;
   }
 
   close() {

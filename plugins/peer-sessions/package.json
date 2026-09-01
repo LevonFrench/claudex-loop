@@ -1,6 +1,6 @@
 {
   "name": "@claudex-loop/peer-sessions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Windows-local concurrent session broker for Claude and Codex MCP clients.",

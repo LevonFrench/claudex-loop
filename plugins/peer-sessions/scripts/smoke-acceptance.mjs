@@ -110,7 +110,7 @@ let lingering = [];
 try {
   const active = await client.callTool('peer_list');
   const handles = new Set(peers.map((peer) => peer.handle));
-  lingering = active.filter((peer) => handles.has(peer.handle));
+  lingering = active.sessions.filter((peer) => handles.has(peer.handle));
 } catch (error) {
   cleanupFailures.push({ status: 'rejected', reason: error });
 } finally {

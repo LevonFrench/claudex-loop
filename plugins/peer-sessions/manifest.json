@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "peer-sessions",
   "display_name": "Peer Sessions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run and message multiple persistent Claude and Codex sessions through one Windows-local MCP broker.",
   "long_description": "Peer Sessions provides named concurrent Claude and Codex sessions to Claude Desktop, Claude Code, and Codex. The broker uses each CLI's structured persistent protocol and mirrors live output to optional visible console windows.",
   "author": {
@@ -17,14 +17,64 @@
   "documentation": "https://github.com/LevonFrench/claudex-loop/tree/main/plugins/peer-sessions/README.md",
   "support": "https://github.com/LevonFrench/claudex-loop/issues",
   "license": "MIT",
-  "keywords": ["claude", "codex", "sessions", "mcp", "windows"],
-  "tools_generated": true,
+  "keywords": [
+    "claude",
+    "codex",
+    "sessions",
+    "mcp",
+    "windows"
+  ],
+  "tools": [
+    {
+      "name": "peer_launch",
+      "description": "Launch one persistent read-access Claude or Codex structured CLI session. Distinct sessions run concurrently. Returns the opaque handle used by every other peer tool."
+    },
+    {
+      "name": "peer_launch_write",
+      "description": "Launch one write-capable Claude or Codex peer. A write peer has repository edit tools and unrestricted shell execution as the current user, so the MCP host must present this destructive tool call for explicit user approval."
+    },
+    {
+      "name": "peer_list",
+      "description": "List active peer sessions without returning their transcript buffers. Returns { sessions: [...] }."
+    },
+    {
+      "name": "peer_resolve",
+      "description": "Resolve one exact unique session name to its opaque handle and current status."
+    },
+    {
+      "name": "peer_send",
+      "description": "Queue one message for a peer without waiting for the turn to finish. Fails if the peer is not running. Poll peer_status until busy is false, then peer_read from the returned cursor. Marked destructive because the handle may refer to a write-capable session."
+    },
+    {
+      "name": "peer_request",
+      "description": "Queue one message and wait for the provider's structured turn-completion event, then return the output produced by that turn. timeoutMs (default 120000, max 600000) bounds queue wait plus turn time. If the deadline passes while the turn is still queued behind other turns, the request is withdrawn and the peer keeps running (timedOut: true, stopped: false). If the deadline passes while this turn is executing, the peer process is STOPPED and its conversation is discarded (timedOut: true, stopped: true). For long tasks prefer peer_send plus peer_status/peer_read polling."
+    },
+    {
+      "name": "peer_read",
+      "description": "Read output newer than a cursor. Returns cursor (pass it back next time), latestCursor, hasMore (more output was available than maxChars allowed), and truncated (the supplied cursor is older than the retained buffer, so some output was lost)."
+    },
+    {
+      "name": "peer_status",
+      "description": "Read process and cursor status for one peer session, including busy (a turn is queued or executing), queuedTurns, lastOutputAt, and, once exited, exitCode and the tail of the provider's stderr."
+    },
+    {
+      "name": "peer_view",
+      "description": "Open another visible Windows console that mirrors one existing peer session and accepts typed turns. Closing a viewer does not stop the peer."
+    },
+    {
+      "name": "peer_stop",
+      "description": "Stop one broker-owned peer process. This does not delete Claude or Codex persisted conversation data."
+    }
+  ],
+  "tools_generated": false,
   "privacy_policies": [
     "https://www.anthropic.com/legal/privacy",
     "https://openai.com/policies/privacy-policy/"
   ],
   "compatibility": {
-    "platforms": ["win32"],
+    "platforms": [
+      "win32"
+    ],
     "runtimes": {
       "node": ">=20"
     }
@@ -34,7 +84,9 @@
     "entry_point": "server/mcp-stdio.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/mcp-stdio.mjs"],
+      "args": [
+        "${__dirname}/server/mcp-stdio.mjs"
+      ],
       "env": {}
     }
   }
