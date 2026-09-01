@@ -33,3 +33,13 @@ Use files under `<project>/.loop/` as the only shared memory. The agent the user
 - Persist the user's original request in `.loop/REQUEST.md` before recon, and record answers/defaults in `QUESTIONS.md` before drafting the plan.
 
 At each transition, update the plain-line state atomically, including `phase`, `round`, `open`, `settled`, `lock`, and `updated`. Keep chat summaries short and point to artifacts.
+
+## Optional controls
+
+All of these are off by default; none changes the durable protocol.
+
+- `-Visible` opens a watchable console for an interactive summon and still returns a durable exit code. `-Headless`, or `XLOOP_HEADLESS=1`, forces the normal windowless path for unattended runs.
+- `-Model <id>` overrides the model for one summon after validation. There is no per-stage model policy.
+- `-CodexPath` / `-ClaudePath` pin an executable when discovery picks the wrong one.
+- `-EvidenceFile` marks packet inputs immutable; `-AppendOnlyFile` marks a path the agent may extend but never rewrite.
+- `.loop/LEDGER.md` accumulates counts-only usage lines when the CLI reports them. It is best effort and never changes a summon's result.
