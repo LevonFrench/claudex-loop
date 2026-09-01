@@ -5,15 +5,27 @@ Updated: 2026-09-01
 ## Current state
 
 - Active branch: `release/xloop-windows-wiki`
-- Last code and workflow commit: `3aa3838bf8f074750f8ffd6e352c391bee583342`
-- Peer Sessions candidate source commit: `61c60eb7b68285589e9314fe945293b127143f59`
-- Peer Sessions version: `0.1.0`
-- MCPB SHA-256: `c19ce8575c9089366cb1c4c2a6200e077c156aada45d9248b2870a3c0278b5a2`
+- Last code and workflow commit: `bd12951` (Peer Sessions 0.1.1; XLoop wrappers and workflow unchanged since `3aa3838bf8f074750f8ffd6e352c391bee583342`)
+- Peer Sessions candidate source commit: `bd12951`
+- Peer Sessions version: `0.1.1`
+- MCPB SHA-256: `006464fe8c94effa761750620d9b67d60df8197c30ef110c8b86c2533f9e9724`
 - Public fork branch: `LevonFrench/claudex-loop:release/xloop-windows-wiki`
-- Windows workflow run `33561542103`: PASS
+- Windows workflow: see the run for the `bd12951` push and its successor before relying on local results.
 - Worktree was clean when this handoff was written.
 
-The Peer Sessions release candidate is built, documented, pushed, and installed for Codex and Claude Code. The installed Claude cache was verified byte-identical to the candidate source. The Codex install resolves directly to the repository plugin. Both plugin managers report version `0.1.0` enabled.
+The Peer Sessions 0.1.1 candidate is built, documented, pushed, and installed for Codex and Claude Code. The installed Claude cache was verified byte-identical to the candidate source. The Codex install resolves directly to the repository plugin. Both plugin managers report version `0.1.1` enabled. The running per-user broker is `0.1.1`; the previous `0.1.0` broker was replaced automatically by the new version-reconciliation path.
+
+## What changed in 0.1.1 and why
+
+The 0.1.0 candidate passed its ten gates, but a real Claude Code session rejected `peer_list` because the MCP layer returned an array as `structuredContent`. The acceptance client had read that field without validating its shape, so the gates could not see it. A multi-lens review of the plugin (MCP spec, session manager, daemon and client, security, PowerShell 5.1, test coverage, documentation drift, operator ergonomics) followed, and every confirmed finding was fixed:
+
+- MCP layer: object-only `structuredContent` mirrored by text, protocol-version negotiation, explicit batch refusal, standard `-32601`/`-32602` codes, cancellation and stdin-EOF handling, host `cwd` forwarded as the default peer directory.
+- Broker: abandoned client sockets and provider stdin errors no longer crash the daemon; a Claude child exiting mid-turn rejects the turn immediately with exit code and stderr tail; `peer_send` rejects stopped peers; a queued request that times out is withdrawn without killing another caller's turn; `truncated` is exact; a failed `taskkill` restores the session state; the lease file is never empty; clients replace an idle older broker and report a busy one; daemon stderr goes to `broker.log`.
+- Viewer: UTF-8 console, stdout/stderr split under `$ErrorActionPreference = 'Stop'`, scrubbed environment, failure reason preserved across the launcher-exit race, never starts a broker.
+- Safety: all terminal control families stripped from peer output, runtime directory refused as a `cwd`, the watchdog released on normal provider exit so a recycled PID is never killed, `.mcpbignore` aligned with the packer allowlist, one version source, MCPB manifest tool list cross-checked by the validator.
+- Ergonomics: `busy`/`queuedTurns`/`lastOutputAt`/`exitCode`/stderr tail in `peer_status`, `hasMore` in `peer_read`, `maxChars` and `stopped` in `peer_request`, every tool description states its contract.
+
+The full list is in `CHANGELOG.md`; the rerun evidence is in `plugins/peer-sessions/ACCEPTANCE.md`.
 
 ## Verified behavior
 
@@ -21,29 +33,36 @@ The Peer Sessions release candidate is built, documented, pushed, and installed 
 - Turns for one peer are serialized and reuse the same provider process and conversation.
 - Visible PowerShell viewers are the default and can be closed and reopened without stopping the peer.
 - Provider access is derived from the fixed `read|write` enum at the broker boundary.
-- Provider children receive an allowlisted environment rather than the host environment.
+- Provider children and viewer consoles receive an allowlisted environment rather than the host environment.
 - Claude peers run without inherited project hooks, settings, plugins, or MCP servers.
 - Codex peers use a private home, zero inherited MCP servers, and ephemeral threads.
 - Future transport smoke runs do not add entries to Codex Recents.
-- Stop and broker-failure cleanup terminate provider process trees.
+- Stop and broker-failure cleanup terminate provider process trees; an abandoned client cannot take the broker down.
 - Runtime state is protected by a verified per-user ACL and a renewable singleton startup lease.
+- Every MCP tool result satisfies the 2025-06-18 tool-result contract; `peer_list` works from Claude Code.
 - The package contains no machine paths, usernames, tokens, transcripts, or raw first-run feedback.
 
-The final local and CI evidence includes the protocol/policy/concurrency suite, eight-way cold broker start, Windows process-tree termination, package privacy validation, PowerShell 5.1 parsing and MCPB packing, Claude hook isolation, Codex MCP isolation, visible multi-turn acceptance, viewer reattachment, root PowerShell packaging, Git Bash cross-shell execution, and doctor report validation.
+The final local evidence includes the 34-test protocol/policy/concurrency suite, eight-way cold broker start, abandoned-socket survival, Windows process-tree termination, package privacy validation, PowerShell 5.1 parsing and MCPB packing, Claude hook isolation, Codex MCP isolation, the visible multi-turn acceptance smoke with viewer reattachment on the rewritten viewer, the official MCPB and Codex plugin validators, and doctor validation including the live broker upgrade.
 
 ## Remaining manual gates
 
-1. Confirm the regular Claude Desktop MCPB approval and discovery flow. The artifact was opened and inspected successfully but is unsigned; do not claim regular Claude Desktop acceptance until the user confirms the install prompt and a new desktop chat exposes the tools.
-2. Restart Codex Desktop or open a new task before expecting the newly installed plugin tools in the current UI process.
+1. Restart Claude Code (and Codex Desktop, or open a new task) so the host loads the installed `0.1.1` plugin; then call `peer_list` from a fresh session and confirm it returns without a schema error before launching peers.
+2. Confirm the regular Claude Desktop MCPB approval and discovery flow with `peer-sessions-0.1.1.mcpb`. The artifact is unsigned; do not claim regular Claude Desktop acceptance until the user confirms the install prompt and a new desktop chat exposes the ten tools listed in the manifest.
 3. The 23 historical smoke-test tasks in Codex Recents remain. They are safe to delete only after the user explicitly authorizes permanent deletion. New smoke tests use ephemeral threads and will not add more.
 4. Do not create a stable XLoop tag yet. The authenticated wiki-warm loop, sparse/no-wiki loop, and forced kill-between-review-rounds resume test remain blocking release gates.
 5. Peer Sessions is still an optional transport. It does not close XLoop finding B1.7 until a separate XLoop integration specification preserves the guarded `.loop/` artifacts, validation, and exit-code semantics.
+
+## Known limitations carried into 0.1.1
+
+- Each visible viewer polls the broker by starting a short-lived Node process about five times per second. A long-lived viewer RPC process would remove that cost; it is not required for correctness.
+- The write gate is the host's approval prompt for the destructive `peer_launch_write` tool. A host configured to auto-approve MCP tools removes that gate; the broker has no independent write confirmation.
+- The caller chooses each peer's `cwd`; it is refused only inside the runtime directory. Pointing a read peer at a credential directory would let it read those files back.
 
 ## Resume actions
 
 1. Verify the branch head and clean worktree.
 2. Check the latest Windows workflow rather than relying only on local tests.
-3. If the user confirms Claude Desktop approval, open a new desktop chat and verify `peer_list`, then launch one Claude and one Codex peer concurrently.
+3. After restarting Claude Code, verify `peer_list`, then launch one Claude and one Codex peer concurrently.
 4. If the user explicitly says to delete the 23 smoke tasks, run the committed cleanup script with its destructive flag and verify the exact filtered count before and after. Do not broaden the filter.
 5. For XLoop release work, run the warm-wiki repository first, then the cold-start repository, and perform the kill-between-rounds resume test before tagging.
 
