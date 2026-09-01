@@ -24,7 +24,8 @@ This file records evidence for the ten release gates in `SCOPE.md`. A passing re
 
 ## Candidate environment
 
-- Candidate source commit: pending initial release commit
+- Candidate source commit: `61c60eb7b68285589e9314fe945293b127143f59`
+- Evidence-record update: this line is committed separately and does not change the tested source or packaged artifact.
 - Node.js: 24.19.0 (package minimum: 20)
 - Windows PowerShell: 5.1.26100.9168
 - Claude Code: 2.1.257
