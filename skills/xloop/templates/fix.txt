@@ -1,0 +1,8 @@
+Act as builder for the bounded fix round below. Read the protocol, state, original contract, and pinned inspection findings at these paths. Fix accepted blocking findings in new commits without amending reviewed commits, rerun the contract proof, and write the required commit list, diff stat, bounded proof tail, and terminal RESULT to the report path.
+
+Round: {{round}}
+Protocol: {{protocol_path}}
+State: {{state_path}}
+Contract: {{contract_path}}
+Inspection: {{inspect_path}}
+Report: {{report_path}}

@@ -1,0 +1,12 @@
+Perform idempotent mechanical wiki closeout. Read the protocol, state, approved plan, settled ledger, wiki inbox, final diff, builder report, and brief target at these paths. Resume from closeout_step; upsert by loop ID and pinned SHA. Write compiled wiki content only as Claude. Record completed steps and terminal RESULT in the report; do not redesign.
+
+Protocol: {{protocol_path}}
+State: {{state_path}}
+Plan: {{plan_path}}
+Ledger: {{review_log_path}}
+Inbox: {{wiki_inbox_path}}
+Diff: {{diff_path}}
+Report: {{report_path}}
+Brief: {{brief_path}}
+Wiki: {{wiki_path}}
+Output: {{output_path}}

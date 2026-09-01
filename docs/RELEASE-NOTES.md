@@ -1,0 +1,61 @@
+# XLoop release candidate
+
+This release candidate replaces the upstream session-dependent orchestration with a Windows-native, file-coupled Claude–Codex loop. It is intended for repositories where planning quality, adversarial review, recoverability, and durable wiki memory matter more than one-shot speed.
+
+## Highlights
+
+- Five durable phases: recon, interrogate, review, build, and closeout.
+- Either Claude or Codex can drive; the other becomes reviewer and builder.
+- Every cross-model turn is reconstructible from `.loop/` files.
+- A failed resume uses a separately rendered self-sufficient packet for read-only work.
+- Build inspection is pinned to generated commit diffs, not the live worktree.
+- Wiki briefs, settled decisions, lessons, and inbox entries compound across loops.
+- PowerShell 5.1 is canonical and Git Bash is supported end to end.
+
+## Installation
+
+From PowerShell:
+
+```powershell
+.\install.ps1
+```
+
+From Git Bash:
+
+```bash
+bash ./install.sh
+```
+
+Both installers verify byte-exact copies and preserve existing destinations unless forced.
+
+## Important safety note
+
+The locked builder flag is `--dangerously-bypass-approvals-and-sandbox`. It is only selected after plan approval, proof-command selection, a clean-tree check, and an approved-baseline check. Run initial live acceptance in a disposable or fully recoverable checkout. Ambiguous write-resume failures stop for operator inspection instead of launching a second builder.
+
+## Compatibility
+
+- Windows 11
+- Windows PowerShell 5.1
+- Git Bash
+- Codex CLI exposing the required non-interactive execution flags
+- Claude CLI exposing print, restricted, tool-selection, resume, and JSON-output flags
+
+Use `scripts/doctor.ps1` to verify the installed CLI surface.
+
+## Validation status
+
+Passed before publication:
+
+- PowerShell 5.1 offline packaging and wrapper suite
+- Git Bash cross-shell suite
+- Skill structure validation
+- CLI environment doctor
+- Bash syntax validation
+- Git whitespace validation
+- Independent protocol/conformance audit
+
+Authenticated warm-wiki and no-wiki acceptance loops remain the final release gate. No stable tag should be created until both pass, including the forced mid-review cold-resume scenario.
+
+## Migration from upstream
+
+This is not a drop-in namespace-preserving update. The active skill is `xloop`; the original upstream skills are retained only under `upstream/`. Install the new package with the supplied installers and start new work from the `xloop` entry point. Existing upstream session state is not imported.

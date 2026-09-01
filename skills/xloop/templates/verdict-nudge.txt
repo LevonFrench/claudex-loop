@@ -1,0 +1,6 @@
+Your preserved prior output did not satisfy the protocol terminator. Re-read it at the findings path and correct only its final verdict contract. `REVISE` requires at least one blocking finding with a concrete Scenario; otherwise use `APPROVE`. Preserve valid findings and write the corrected complete file to the distinct output path.
+
+Round: {{round}}
+Protocol: {{protocol_path}}
+Findings: {{findings_path}}
+Output: {{output_path}}

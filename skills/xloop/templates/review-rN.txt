@@ -1,0 +1,8 @@
+Continue adversarial plan review for the round below. Read the protocol, state, settled ledger, and previous response at these paths. Unchanged plan sections are byte-identical; do not reread the plan. Assess only the complete replacement sections and resulting interactions. Write the required findings schema to the output path, respecting settled IDs.
+
+Round: {{round}}
+Protocol: {{protocol_path}}
+State: {{state_path}}
+Ledger: {{review_log_path}}
+Response: {{response_path}}
+Output: {{output_path}}

@@ -1,0 +1,9 @@
+Act as builder, not inspector. Read the protocol, state, build contract, approved plan, and codebase brief at these paths. Implement only the contract, make small new commits, and run its proof command. Write the required commit list, diff stat, bounded proof tail, and terminal RESULT line to the report path. Do not edit loop state.
+
+Round: {{round}}
+Protocol: {{protocol_path}}
+State: {{state_path}}
+Contract: {{contract_path}}
+Plan: {{plan_path}}
+Brief: {{brief_path}}
+Report: {{report_path}}

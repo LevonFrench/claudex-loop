@@ -1,11 +1,11 @@
 {
-  "name": "claudex-loop",
-  "description": "Four-phase plan hardening for Claude Code: recon → interrogate → adversarial Codex review → cross-model build & inspection. Two AI models harden your plan before a line of code exists — then swap jobs to build it, and whoever built it never grades it. Includes claudex-loop (formerly crucible), codex-review, and codex-build.",
+  "name": "claudex-loop-custom",
+  "description": "Windows-native, wiki-first Claude-Codex loop with durable .loop state, bounded adversarial review, cold resumption, and pinned-commit build inspection. Ships the xloop skill only.",
   "author": {
     "name": "Chase AI",
     "url": "https://youtube.com/@chaseai"
   },
   "homepage": "https://github.com/chaseai-yt/claudex-loop",
   "license": "MIT",
-  "keywords": ["planning", "codex", "cross-model", "adversarial-review", "skills"]
+  "keywords": ["planning", "codex", "claude", "wiki", "cross-model", "adversarial-review", "windows"]
 }

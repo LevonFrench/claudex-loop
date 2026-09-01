@@ -1,0 +1,22 @@
+name: Windows offline smoke tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-offline:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell 5.1 packaging and wrapper smoke
+        shell: powershell
+        run: .\tests\mechanical-smoke.ps1
+      - name: Git Bash packaging and cross-shell smoke
+        shell: bash
+        run: bash ./tests/run-git-bash.sh
