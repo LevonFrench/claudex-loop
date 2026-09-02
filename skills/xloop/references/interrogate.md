@@ -6,16 +6,19 @@ Read this file only when `STATE.md` says `phase: interrogate`.
 
 Read the assumptions ledger, task request, relevant settled decisions, and brief. Write `.loop/QUESTIONS.md` before asking anything. Include only choices that can materially change architecture, scope, proof, risk, or user-visible behavior.
 
-Each load-bearing question has four lines:
+Each load-bearing question has five lines:
 
 ```text
 Q: ...
 Why load-bearing: ...
 Options: A ... | B ...
+Recommended: <option> because <one sentence>
 Default-if-silent: ...
 ```
 
-End with one compact cosmetic mini-batch and `Pre-settled from wiki (say so to reopen)`. State the defaults plainly. Ask the entire file in one message and target no more than two user turns. Do not turn each answer into another question.
+End with one compact cosmetic mini-batch and `Pre-settled from wiki (say so to reopen)`. State the defaults plainly and close with one line telling the user that `defaults` accepts every recommendation and that individual items may be overridden by ID. Ask the entire file in one message and target no more than two user turns. Do not turn each answer into another question.
+
+Never include an authorization question. Sending packets to the other agent, letting it read cited project context, and letting the builder write and commit inside the project are already authorized by invoking the loop; a question such as "may XLoop send this plan to Claude" is not load-bearing and must not appear.
 
 If `proof_cmd` is unknown, ask for or recommend it here. If recon hit its file cap or identified a research gap, include that decision here rather than interrupting recon.
 

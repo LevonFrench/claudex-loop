@@ -370,6 +370,46 @@ try {
             Remove-Item Env:XLOOP_MOCK_ARGS_FILE -ErrorAction SilentlyContinue
         }
 
+        # Claude summons never use plan mode: a read-only agent in plan mode believes
+        # it must ask to leave it, and nobody is present to answer. Every summon
+        # carries the fixed contract that the final message is the artifact.
+        $claudeArgsDump = Join-Path $tempRoot 'claude-args.txt'
+        $env:XLOOP_MOCK_ARGS_FILE = $claudeArgsDump
+        try {
+            $env:XLOOP_MOCK_MODE = 'bom'
+            $claudeRead = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\claude-read-args.md', '-TimeoutSec', '5')
+            Assert-True -Condition ($claudeRead.ExitCode -eq 0) -Message "Read-intent claude call failed: $($claudeRead.Output)"
+            $claudeReadArgs = [IO.File]::ReadAllText($claudeArgsDump)
+            Assert-True -Condition (Test-ArgumentPair -Dump $claudeReadArgs -Name '--permission-mode' -Value 'dontAsk') -Message "Claude read intent did not use dontAsk: $claudeReadArgs"
+            Assert-True -Condition (-not (Test-ArgumentPair -Dump $claudeReadArgs -Name '--permission-mode' -Value 'plan')) -Message 'Claude read intent still selects plan mode.'
+            Assert-True -Condition (Test-ArgumentPair -Dump $claudeReadArgs -Name '--tools' -Value 'Read,Grep,Glob') -Message 'Claude read intent widened its tool set.'
+            $claudeReadParts = @($claudeReadArgs -split "`n")
+            $systemIndex = [Array]::IndexOf($claudeReadParts, '--append-system-prompt')
+            Assert-True -Condition ($systemIndex -ge 0 -and $systemIndex + 1 -lt $claudeReadParts.Count) -Message 'Claude read intent carried no summon system prompt.'
+            $systemPrompt = $claudeReadParts[$systemIndex + 1]
+            Assert-True -Condition ($systemPrompt -match 'final' -and $systemPrompt -match 'message' -and $systemPrompt -match 'never ask') -Message "Claude summon system prompt does not state the final-message contract: $systemPrompt"
+
+            $env:XLOOP_MOCK_MODE = 'result-pass'
+            $claudeWrite = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\claude-write-args.md', '-Sandbox', 'write', '-TimeoutSec', '5')
+            Assert-True -Condition ($claudeWrite.ExitCode -eq 0) -Message "Write-mode claude call failed: $($claudeWrite.Output)"
+            $claudeWriteArgs = [IO.File]::ReadAllText($claudeArgsDump)
+            Assert-True -Condition (Test-ArgumentPair -Dump $claudeWriteArgs -Name '--permission-mode' -Value 'acceptEdits') -Message "Claude write mode did not keep acceptEdits: $claudeWriteArgs"
+            Assert-True -Condition (@($claudeWriteArgs -split "`n") -ccontains '--append-system-prompt') -Message 'Claude write mode dropped the summon system prompt.'
+        } finally {
+            Remove-Item Env:XLOOP_MOCK_ARGS_FILE -ErrorAction SilentlyContinue
+        }
+
+        # Every packet template states the provider-neutral output contract so a
+        # summoned agent without write tools still produces a valid artifact.
+        $templateFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'skills\xloop\templates') -Filter '*.txt' -File)
+        Assert-True -Condition ($templateFiles.Count -ge 7) -Message 'Expected at least seven packet templates.'
+        foreach ($templateFile in $templateFiles) {
+            $templateText = [IO.File]::ReadAllText($templateFile.FullName)
+            Assert-True -Condition ($templateText -match 'final message is stored verbatim as the output path') -Message "Template $($templateFile.Name) does not state the final-message output contract."
+            Assert-True -Condition ($templateText -match 'never ask for approval, permission, or clarification') -Message "Template $($templateFile.Name) does not forbid asking a human."
+            Assert-True -Condition ($templateText -notmatch '(?i)\bwrite (only )?(the|your) (required|assigned)? ?(findings|report|output)') -Message "Template $($templateFile.Name) still instructs the agent to write its output file."
+        }
+
         $badModel = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\bad-model.md', '-Model', 'evil model; rm -rf', '-TimeoutSec', '5')
         Assert-True -Condition ($badModel.ExitCode -eq 1) -Message 'Wrapper accepted an unvalidated model identifier.'
 

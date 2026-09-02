@@ -155,16 +155,17 @@ The log is compact and is read every round:
 - F2.2 [r2]: rejected — out of scope per S2
 ## Rounds
 r1: REVISE, 4 findings (2 blocking) | accepted F1.1,F1.2 | rejected F1.3
-r2: APPROVE
+r2: REVISE (format-salvaged), 1 finding (1 blocking) | accepted F2.1
+r3: APPROVE
 ```
 
-Do not copy critiques into the log. A finding attacking a settled ID is automatically void unless it supplies a new concrete failure scenario not previously raised. Record rulings, then reuse them without relitigation.
+A `(format-salvaged)` round is one whose findings file stayed malformed after the format budget was spent but still contained exactly parseable findings; the driver arbitrated those findings as `REVISE` under §6. Do not copy critiques into the log. A finding attacking a settled ID is automatically void unless it supplies a new concrete failure scenario not previously raised. Record rulings, then reuse them without relitigation.
 
 ### 3.6 Recon and questions
 
 `ASSUMPTIONS.md` entries are numbered and include `confidence: high|med|low`, one-line evidence, and one provenance tag: `[wiki-settled: <id>]`, `[brief]`, `[code]`, or `[inferred]`.
 
-`QUESTIONS.md` is one batch. Each load-bearing entry has four fields: `Q`, `why load-bearing`, `options`, `default-if-silent`. Follow with one cosmetic mini-batch and a read-only `Pre-settled from wiki (say so to reopen)` list.
+`QUESTIONS.md` is one batch. Each load-bearing entry has four fields: `Q`, `why load-bearing`, `options`, `default-if-silent`, plus `recommended`, the driver's own choice with a one-sentence reason. Follow with one cosmetic mini-batch and a read-only `Pre-settled from wiki (say so to reopen)` list. Escalation batches (round-5 review, build `awaiting-user`, the dirty-tree gate, the fix cap) use the same five fields per item, end with one line offering `defaults`, per-ID overrides, or `abort`, and are displayed once for a single reply. Authorization is never a question: invoking the loop already authorizes summoning the other agent, sending it packet paths and cited project context, and letting the builder write and commit inside the project.
 
 ### 3.7 Build artifacts
 
@@ -239,14 +240,15 @@ At recon, compare the brief's `verified-against` SHA with HEAD. Map `git diff --
 ## 6. Convergence, build, and platform rules
 
 - Maximum five plan-review rounds, two fix rounds, and zero timeout retries. Exit `2` carries `nudge_class`: `format` and `mutation` have independent one-use nudges, so a single formatting slip and a single restored mutation do not consume each other's budget. A repeat of either class escalates, and one summon makes at most three attempts. Record the spend with `loop-step.ps1 -Transition record-nudge -NudgeClass format|mutation` before summoning the retry; when that transition refuses, escalate.
-- `APPROVE` is parsed, never inferred. Invalid `REVISE`, missing terminator, malformed output, or a pseudo-finding under `APPROVE` gets exactly one format nudge; a second failure of that class escalates as one user batch.
+- `APPROVE` is parsed, never inferred. Invalid `REVISE`, missing terminator, malformed output, or a pseudo-finding under `APPROVE` gets exactly one format nudge. After the format budget is spent, a malformed findings file that still contains at least one line in the exact `[F<round>.<i>] severity | reference | claim` form followed by a `Scenario:` line is treated as `VERDICT: REVISE` over exactly those parseable findings; the driver arbitrates them normally, records the round as `format-salvaged`, and does not ask the user. Only a malformed file with zero parseable findings escalates as one user batch. Approval is never salvaged: a malformed file cannot approve.
+- The driver arbitrates findings; the user is never asked to accept or reject one. User decisions occur only at the interrogate batch, a round-5 review escalation, a build escalation, the dirty-tree gate, and the fix cap, always as one batch with `recommended` and `default-if-silent` per item (§3.6). Summons need no user authorization.
 - The packet decides which terminator is legal, and the wrapper enforces it from the assigned output name: `r<N>-findings.md` and `b<N>-inspect.md` require `VERDICT:`, `b<N>-report.md` and `CLOSEOUT-REPORT.md` require `RESULT:`, and `-Expect verdict|result` states it explicitly for any other path. A verdict file may contain finding-shaped lines only in the exact `[F<round>.<i>]`/`[B<round>.<i>] severity | reference | claim` form; a bare `[F5]` or a severity-less header is a pseudo-finding and invalidates the file under either verdict.
 - Codex read-intent maps to the `workspace-write` sandbox on Windows and `read-only` elsewhere, for both the fresh `-s` form and the resumed `-c sandbox_mode=` form. Read-intent keeps its unconditional one-time fresh-packet fallback. Only `-Sandbox write` selects the locked dangerous build flag, and only that mode stops on an ambiguous post-turn resume failure.
 - A summon is watchable when a real console is attached, when `-Visible` is passed, or when `XLOOP_VISIBLE=1` is set; it is headless whenever a driver or CI is capturing the streams, or `-Headless`/`XLOOP_HEADLESS=1` is used. A watchable summon streams the transcript live, hands its exit code back through durable files, and deletes that handoff material afterwards.
 - Clerical work belongs to `loop-render.ps1` and `loop-step.ps1`: strict placeholder rendering and named idempotent state transitions. Neither reads findings, arbitrates, nor invokes a model, and the driver still owns every decision. An advancing transition names its target (`-ToRound`, `-ToBuildRound`, `-ToCloseoutStep`, `-Attempt`), so replaying it after a crash reports `already_applied` instead of advancing again, and values written by the same call (such as `-PinnedSha` with `build-inspect`) satisfy that call's own prerequisites.
 - Agent executables are resolved to canonical absolute paths and validated with a bounded `--version` probe, so the summon launches the binary that was checked and a hanging probe cannot outlive discovery.
-- Round 5 `REVISE` escalates surviving blockers and both positions. There is no round 6.
-- Build begins only after review approval, a configured proof command, clean `git -C <project> status -sb`, and HEAD exactly equal to `base_sha`. Ask once whether to commit, stash, or abort for dirt; if HEAD moved cleanly, return to bounded drift reconciliation/review rather than folding unrelated commits into the build range.
+- Round 5 `REVISE` escalates surviving blockers and both positions as one §3.6 batch with a recommended ruling and default per item. There is no round 6.
+- Build begins only after review approval, a configured proof command, clean `git -C <project> status -sb`, and HEAD exactly equal to `base_sha`. For dirt, ask once as a §3.6 batch (commit, stash, or abort; default abort); if HEAD moved cleanly, return to bounded drift reconciliation/review rather than folding unrelated commits into the build range.
 - Record `base_sha` at approval. Builder changes are small new commits. Pin HEAD before each inspection. Fixes are new commits and cause a new pin; never amend reviewed commits.
 - After two fix rounds, the author may complete only accepted remaining fixes and must log that role exception. Proof must pass and no blocking finding may remain.
 - All Git commands use `git -C <project>`. On dubious ownership, stop and show the exact `git config --global --add safe.directory <path>` command; never run it automatically.

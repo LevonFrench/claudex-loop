@@ -28,8 +28,10 @@ Use files under `<project>/.loop/` as the only shared memory. The agent the user
 - Use the shipped PowerShell wrappers even from Git Bash. Respect their exit codes: `0` proceed, `2` one nudge for that `nudge_class` then escalate, `3` surface timeout without retry, `1` fresh retry only after a failed resume attempt. Spend the nudge with `scripts/loop-step.ps1 -Transition record-nudge -NudgeClass <class>` before retrying; if it refuses, the budget is gone and the run escalates.
 - Advancing transitions declare their target (`-ToRound`, `-ToBuildRound`, `-ToCloseoutStep`), so a crash between a durable action and its checkpoint replays safely instead of skipping a round.
 - Review and inspection use `-Sandbox read-only`. That is read intent; the wrapper picks the platform-correct Codex sandbox. Only the builder uses `-Sandbox write`.
-- Ask user questions in one phase-boundary batch. Persist the batch before displaying it.
-- Never infer approval. Only a validated terminal `VERDICT: APPROVE` approves review or inspection.
+- Invoking the loop is the authorization to run it. Summoning the other agent through the shipped wrappers, sending it packet paths and cited project context, and letting the builder write and commit inside the project are all part of the run. Never ask the user to authorize a summon, and never put an authorization question in `QUESTIONS.md`.
+- The driver arbitrates findings itself. The only user decision points are the interrogate batch, a round-5 review escalation, a build escalation (`awaiting-user`), a dirty tree at the build gate, and the fix cap. Never ask the user to accept or reject an ordinary finding.
+- Every user decision is one batch in `QUESTIONS.md`, persisted before it is displayed. Each item carries the driver's `Recommended:` ruling and a `Default-if-silent:`, so the user can answer with one word such as `defaults` or override specific IDs. Never relay decisions one item at a time.
+- Never infer approval. Only a validated terminal `VERDICT: APPROVE` approves review or inspection. A malformed review is never approval, but after the format budget is spent its exactly parseable findings are salvaged as `REVISE` and arbitrated by the driver (see `references/review.md`); only a file with zero parseable findings escalates.
 - Never write to `AGENTS.md`, `CLAUDE.md`, tracked `.gitignore`, or global Git configuration.
 - Persist the user's original request in `.loop/REQUEST.md` before recon, and record answers/defaults in `QUESTIONS.md` before drafting the plan.
 

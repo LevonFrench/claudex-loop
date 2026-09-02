@@ -59,6 +59,15 @@ function Convert-ClaudeEnvelope {
     return [pscustomobject]@{ Result = [string]$envelope.result; SessionId = [string]$envelope.session_id }
 }
 
+function Get-SummonSystemPrompt {
+    # One fixed contract for every Claude summon. The wrapper stores the final
+    # assistant message as the output file, so the agent must never try to write
+    # it, ask a human, or wrap the artifact in prose about tooling.
+    return ('You are a non-interactive agent summoned by an xloop wrapper. No human is present: nobody can answer questions, approve tool use, or grant permissions, so never ask; work within the tools you have. ' +
+        'The wrapper stores your final assistant message verbatim as the assigned output file. Your final message must be exactly the artifact contents and nothing else: no preamble, no explanation of tooling, no code fence. ' +
+        'If you lack write tools, that is expected; do not try to create files and do not mention it. If you have write tools, you may also write the output path, but the final message still must be the full artifact.')
+}
+
 $metadataPath = ''
 $guard = $null
 $violations = New-Object System.Collections.ArrayList
@@ -117,11 +126,14 @@ try {
         if ($additionalDirectory) { $arguments += @('--add-dir', $additionalDirectory) }
         if ($kind -eq 'resume') { $arguments += @('--resume', $ResumeSession) }
         if ($Model) { $arguments += @('--model', $Model) }
+        # Read intent never uses plan mode: plan mode makes the agent believe it must
+        # ask to leave it, and read-only summons have nobody to ask.
         if ($Sandbox -eq 'read-only') {
-            $arguments += @('--permission-mode', 'plan', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob')
+            $arguments += @('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob')
         } else {
             $arguments += @('--permission-mode', 'acceptEdits', '--tools', 'Read,Grep,Glob,Edit,Write,Bash', '--allowedTools', 'Read,Grep,Glob,Edit,Write,Bash')
         }
+        $arguments += @('--append-system-prompt', (Get-SummonSystemPrompt))
         $arguments += @('--strict-mcp-config', '--disable-slash-commands', '--output-format', 'json')
 
         $native = Invoke-NativeProcess -Executable $claude -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $guard

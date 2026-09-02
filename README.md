@@ -118,6 +118,26 @@ The locked v1 choices are:
 
 The Codex builder flag removes Codex approval and sandbox protections. XLoop only uses it after plan approval, a clean-tree and baseline gate, and an explicit role flip; run live builds only in repositories whose Git state you are prepared to recover.
 
+### Driving from Codex
+
+Invoking the loop is the authorization for every summon. The driver never asks you to authorize sending packets to Claude, never asks you to accept or reject individual findings, and presents each user decision as one batch with a recommended ruling and a default, so `defaults` is a complete answer.
+
+Codex runs the wrapper summons inside its workspace-write sandbox, which blocks network access, so the child `claude` process fails with `ConnectionRefused` and Codex asks you to approve an escalation for every summon. A Codex execution-policy rule lets the wrapper scripts run outside the sandbox without a prompt. Add this block to `%USERPROFILE%\.codex\rules\default.rules` (create the file if it is missing), replacing `<user>` with your Windows user name and repeating the line for `loop-codex.ps1`, `loop-render.ps1`, `loop-step.ps1`, `loop-status.ps1`, and `loop-init.ps1`:
+
+```text
+# BEGIN claudex-loop xloop wrappers
+prefix_rule(pattern=[["powershell", "powershell.exe", "pwsh", "pwsh.exe"], "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Users\\<user>\\.agents\\skills\\xloop\\scripts\\loop-claude.ps1"], decision="allow", justification="xloop summon: the claude CLI needs network access")
+# END claudex-loop xloop wrappers
+```
+
+Each backslash in the path is written twice. The rule matches only the exact `powershell -NoProfile -ExecutionPolicy Bypass -File <installed wrapper>` form the driver prompt uses; any other command is unaffected. Verify it before relying on it:
+
+```powershell
+codex execpolicy check --pretty --rules "$env:USERPROFILE\.codex\rules\default.rules" -- powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.agents\skills\xloop\scripts\loop-claude.ps1" -Project X:\work\project
+```
+
+The output must end with `"decision": "allow"`. This rule is a deliberate widening of the Codex sandbox for six specific scripts, which is why the installer does not write it for you.
+
 ## Peer Sessions
 
 Peer Sessions is the direct live-session layer. One per-user broker owns up to 32 Claude or Codex provider processes and inherits the MCP host's Windows token, so run the desktop and CLI clients unelevated. Every peer has an exact name, an opaque routing handle, its own bounded turn queue, and a memory-only output ring. Turns are ordered within one peer while different peers run concurrently. Visible viewers open by default; closing a viewer leaves the provider alive, and `peer_view` reopens it. Claude peers ignore project hooks/settings/customizations, while Codex peers use an isolated configuration with zero inherited MCP servers and an ephemeral thread that does not enter Codex Recents.

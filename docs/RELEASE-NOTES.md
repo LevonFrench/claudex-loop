@@ -12,6 +12,10 @@ This release candidate replaces the upstream session-dependent orchestration wit
 - Wiki briefs, settled decisions, lessons, and inbox entries compound across loops.
 - PowerShell 5.1 is canonical and Git Bash is supported end to end.
 
+## Approval-free driving
+
+Invoking the loop authorizes every summon; the driver never asks for permission to send packets to the other agent and never relays individual findings for a yes/no ruling. Read-only Claude summons run in `dontAsk` mode with a fixed system prompt stating that the final message is stored verbatim as the artifact, which removes the prose-about-tooling failures that previously burned the format nudge and forced a human gate. A review that stays malformed after the nudge is salvaged when it still contains parseable findings; only a file with none escalates, and approval is never salvaged. Every remaining user decision is one batch with a recommended ruling and a default per item. Drivers running under Codex should add the execution-policy rule described in the README so wrapper summons run outside the sandbox without a prompt.
+
 ## Installation
 
 From PowerShell:
