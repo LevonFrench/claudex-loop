@@ -181,6 +181,7 @@ mutation_nudged:
 lock: $Author $PID $stamp
 updated: $stamp
 closeout_step:
+ship_check:
 max_rounds: $MaxRounds
 max_fix_rounds: $MaxFixRounds
 max_nudges: 1

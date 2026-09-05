@@ -819,5 +819,303 @@ try {
     if ([IO.Directory]::Exists($tempRoot)) { [IO.Directory]::Delete($tempRoot, $true) }
 }
 
+# ---- Scope loop A (S1, S2, S9) ----
+# Truth gates: the ship gate (S1), the brief and index gate (S2), and the
+# generated handoff header (S9), exercised against disposable Git repositories.
+# The region owns its own temporary root because the suite's root above has
+# already been removed by the time this runs.
+$loopATempRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-offline-smoke-loop-a-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($loopATempRoot) | Out-Null
+try {
+    $loopAUtf8 = New-Object Text.UTF8Encoding($false)
+    $shipCheckScript = Join-Path $repo 'skills\xloop\scripts\loop-ship-check.ps1'
+    $briefCheckScript = Join-Path $repo 'skills\xloop\scripts\loop-brief-check.ps1'
+    $repoShipCheck = Join-Path $repo 'scripts\ship-check.ps1'
+    $loopAStepScript = Join-Path $repo 'skills\xloop\scripts\loop-step.ps1'
+    $loopACheckIds = @('committed', 'pushed', 'docs', 'wiki', 'brief', 'handoff')
+
+    function Invoke-FixtureGit {
+        param([string]$Root, [string[]]$Arguments)
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = @(& git -c core.autocrlf=false -c core.safecrlf=false -c user.name=smoke -c user.email=smoke@localhost -C $Root @Arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedPreference
+        }
+        $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+        if ($exitCode -ne 0) { throw "git $($Arguments -join ' ') failed in ${Root}: $text" }
+        return $text
+    }
+    function Write-FixtureFile {
+        param([string]$Path, [string]$Content)
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
+        [IO.File]::WriteAllText($Path, $Content, $loopAUtf8)
+    }
+    function Add-FixtureCommit {
+        # Commits the named files and returns the new HEAD.
+        param([string]$Root, [hashtable]$Files, [string]$Message)
+        foreach ($relative in $Files.Keys) { Write-FixtureFile -Path (Join-Path $Root $relative) -Content $Files[$relative] }
+        [void](Invoke-FixtureGit -Root $Root -Arguments @('add', '-A'))
+        $messageFile = Join-Path $loopATempRoot ('commit-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Write-FixtureFile -Path $messageFile -Content $Message
+        [void](Invoke-FixtureGit -Root $Root -Arguments @('commit', '-q', '-F', $messageFile))
+        return (Invoke-FixtureGit -Root $Root -Arguments @('rev-parse', 'HEAD'))
+    }
+    function Set-FixturePin {
+        # Keeps STATE and the brief anchored the way closeout leaves them.
+        param([string]$StatePath, [string]$BriefPath, [string]$BaseSha, [string]$PinnedSha)
+        $text = [IO.File]::ReadAllText($StatePath)
+        $text = $text -replace '(?m)^base_sha:[^\r\n]*', "base_sha: $BaseSha"
+        $text = $text -replace '(?m)^pinned_sha:[^\r\n]*', "pinned_sha: $PinnedSha"
+        Write-FixtureFile -Path $StatePath -Content $text
+        if ($BriefPath) {
+            $briefText = [IO.File]::ReadAllText($BriefPath) -replace '(?m)^verified-against:[^\r\n]*', "verified-against: $PinnedSha"
+            Write-FixtureFile -Path $BriefPath -Content $briefText
+        }
+    }
+    function Reset-FixtureCloseout {
+        param([string]$StatePath)
+        $text = [IO.File]::ReadAllText($StatePath)
+        $text = $text -replace '(?m)^closeout_step:[^\r\n]*', 'closeout_step: log'
+        $text = $text -replace '(?m)^ship_check:[^\r\n]*', 'ship_check:'
+        Write-FixtureFile -Path $StatePath -Content $text
+    }
+    function Get-ShipCheckStatus {
+        param([string]$JsonText, [string]$Id)
+        $parsed = $JsonText | ConvertFrom-Json
+        $check = @($parsed.checks | Where-Object { $_.id -eq $Id })
+        if ($check.Count -ne 1) { throw "Check $Id missing from the ship-check report: $JsonText" }
+        return $check[0].status
+    }
+    function Assert-ShipOk {
+        param([string]$Project, [string]$Why)
+        $run = Invoke-ChildPowerShell -Script $shipCheckScript -Arguments @('-Project', $Project, '-Json')
+        Assert-True -Condition ($run.ExitCode -eq 0) -Message "${Why}: ship check exited $($run.ExitCode), expected 0: $($run.Output)"
+        foreach ($id in $loopACheckIds) {
+            Assert-True -Condition ((Get-ShipCheckStatus -JsonText $run.Output -Id $id) -eq 'OK') -Message "${Why}: check $id was not OK: $($run.Output)"
+        }
+        return $run.Output
+    }
+    function Assert-ShipTodo {
+        # Exactly one TODO with the expected id, the text report names it, and the
+        # closeout completion transition is refused without touching STATE.
+        param([string]$Project, [string]$Id, [string]$Why, [string[]]$AlsoTodo = @())
+        $run = Invoke-ChildPowerShell -Script $shipCheckScript -Arguments @('-Project', $Project, '-Json')
+        Assert-True -Condition ($run.ExitCode -eq 1) -Message "${Why}: ship check exited $($run.ExitCode), expected 1: $($run.Output)"
+        Assert-True -Condition ((Get-ShipCheckStatus -JsonText $run.Output -Id $Id) -eq 'TODO') -Message "${Why}: check $Id was not TODO: $($run.Output)"
+        foreach ($other in $loopACheckIds) {
+            if ($other -eq $Id -or $other -in $AlsoTodo) { continue }
+            Assert-True -Condition ((Get-ShipCheckStatus -JsonText $run.Output -Id $other) -eq 'OK') -Message "${Why}: check $other was not OK: $($run.Output)"
+        }
+        $text = Invoke-ChildPowerShell -Script $shipCheckScript -Arguments @('-Project', $Project)
+        Assert-True -Condition ($text.ExitCode -eq 1 -and $text.Output -match ('(?m)^TODO ' + [regex]::Escape($Id) + '\b.*fix: ')) -Message "${Why}: text report lacks 'TODO $Id' with a fix: $($text.Output)"
+        $stateBefore = [IO.File]::ReadAllText((Join-Path $Project '.loop\STATE.md'))
+        $refused = Invoke-ChildPowerShell -Script $loopAStepScript -Arguments @('-Project', $Project, '-Transition', 'closeout-next', '-ToCloseoutStep', 'complete')
+        Assert-True -Condition ($refused.ExitCode -eq 1) -Message "${Why}: closeout completion was not refused: $($refused.Output)"
+        Assert-True -Condition ($refused.Output -match ('TODO ' + [regex]::Escape($Id) + '\b')) -Message "${Why}: the refusal did not name $Id`: $($refused.Output)"
+        $stateAfter = [IO.File]::ReadAllText((Join-Path $Project '.loop\STATE.md'))
+        Assert-True -Condition ($stateAfter -ceq $stateBefore) -Message "${Why}: a refused completion still wrote STATE.md."
+        return $run.Output
+    }
+
+    # S1 fixture: a project with one loop at closeout_step: log, a wiki outside
+    # the repository, and a brief anchored to the pinned commit.
+    $shipProject = Join-Path $loopATempRoot 'ship project [#]'
+    $shipWiki = Join-Path $loopATempRoot 'ship wiki'
+    $shipRemote = Join-Path $loopATempRoot 'ship remote.git'
+    $shipState = Join-Path $shipProject '.loop\STATE.md'
+    $shipBrief = Join-Path $shipWiki 'wiki\references\codebase-brief.md'
+    Write-FixtureFile -Path (Join-Path $shipProject 'src\a.txt') -Content "a`n"
+    Write-FixtureFile -Path (Join-Path $shipProject 'README.md') -Content "# fixture`n"
+    Write-FixtureFile -Path (Join-Path $shipProject 'CHANGELOG.md') -Content "# changelog`n"
+    Write-FixtureFile -Path (Join-Path $shipProject 'docs\NOTES.md') -Content "notes`n"
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('init', '-q'))
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('symbolic-ref', 'HEAD', 'refs/heads/main'))
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{} -Message 'initial'
+    Write-FixtureFile -Path (Join-Path $shipProject '.git\info\exclude') -Content "/.loop/`n"
+    # An older loop: no ship_check line yet, so the passing gate must append it.
+    Write-FixtureFile -Path $shipState -Content (@(
+        'loop: ship-smoke', 'phase: closeout', 'round: 1', 'build_round: 1', 'build_step: complete', 'escalation_kind:',
+        'author: claude', 'reviewer: codex', 'codex_thread:', 'claude_session:', 'resume_fallback:',
+        "wiki: $shipWiki", 'brief: wiki/references/codebase-brief.md', "brief_verified: $shipHead",
+        "base_sha: $shipHead", "pinned_sha: $shipHead", 'previous_pinned_sha:',
+        'proof_cmd: powershell.exe -NoProfile -Command exit 0', 'verdict: APPROVE', 'open:', 'settled:',
+        'format_nudged:', 'mutation_nudged:', 'lock:', 'updated: 2026-01-01T00:00:00-05:00', 'closeout_step: log',
+        'max_rounds: 5', 'max_fix_rounds: 2', 'max_nudges: 1'
+    ) -join "`r`n")
+    Write-FixtureFile -Path (Join-Path $shipWiki 'wiki\_index.md') -Content "# index`n- [Brief](references/codebase-brief.md)`n"
+    Write-FixtureFile -Path $shipBrief -Content "---`ntitle: brief`ncategory: reference`nverified-against: $shipHead`ncovers:`n  - src/`nvolatility: hot`n---`n# Brief`n## Hot files`n- ``src/a.txt`` entry`n"
+
+    # Happy path: every check OK, the completion transition passes, records an
+    # ISO-8601 ship_check by appending the missing field, and replays idempotently.
+    [void](Assert-ShipOk -Project $shipProject -Why 'clean fixture')
+    $complete = Invoke-ChildPowerShell -Script $loopAStepScript -Arguments @('-Project', $shipProject, '-Transition', 'closeout-next', '-ToCloseoutStep', 'complete')
+    Assert-True -Condition ($complete.ExitCode -eq 0) -Message "Closeout completion failed on a clean fixture: $($complete.Output)"
+    $completeJson = $complete.Output | ConvertFrom-Json
+    Assert-True -Condition ($completeJson.applied -eq $true -and $completeJson.ship_check -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$') -Message "Completion did not report an ISO-8601 ship_check: $($complete.Output)"
+    $completedState = [IO.File]::ReadAllText($shipState)
+    Assert-True -Condition ($completedState -match '(?m)^closeout_step: complete\s*$') -Message 'Completion did not advance closeout_step.'
+    Assert-True -Condition ($completedState -match ('(?m)^ship_check: ' + [regex]::Escape($completeJson.ship_check) + '\s*$')) -Message 'ship_check was not recorded in STATE.md.'
+    Assert-True -Condition ($completedState -match '(?m)^loop: ship-smoke\s*$') -Message 'Appending ship_check reflowed other STATE.md lines.'
+    $completeReplay = Invoke-ChildPowerShell -Script $loopAStepScript -Arguments @('-Project', $shipProject, '-Transition', 'closeout-next', '-ToCloseoutStep', 'complete')
+    $replayJson = $completeReplay.Output | ConvertFrom-Json
+    Assert-True -Condition ($completeReplay.ExitCode -eq 0 -and $replayJson.already_applied -eq $true -and $replayJson.ship_check -ceq $completeJson.ship_check) -Message "Replaying a passed completion re-ran the gate or moved ship_check: $($completeReplay.Output)"
+    Reset-FixtureCloseout -StatePath $shipState
+
+    # Dirty tree.
+    Write-FixtureFile -Path (Join-Path $shipProject 'stray.txt') -Content "stray`n"
+    [void](Assert-ShipTodo -Project $shipProject -Id 'committed' -Why 'dirty tree')
+    Remove-Item -LiteralPath (Join-Path $shipProject 'stray.txt')
+
+    # Unpushed pin: an upstream exists and the pinned commit is not on it.
+    [IO.Directory]::CreateDirectory($shipRemote) | Out-Null
+    [void](Invoke-FixtureGit -Root $shipRemote -Arguments @('init', '-q', '--bare'))
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('remote', 'add', 'origin', $shipRemote))
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', '-u', 'origin', 'main'))
+    $pushedReport = Assert-ShipOk -Project $shipProject -Why 'pushed fixture'
+    Assert-True -Condition ($pushedReport -match 'origin/main') -Message "The pushed check did not name the upstream: $pushedReport"
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{ 'src\b.txt' = "b`n"; 'CHANGELOG.md' = "# changelog`n- b`n" } -Message 'add b with changelog'
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipTodo -Project $shipProject -Id 'pushed' -Why 'unpushed pin')
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    [void](Assert-ShipOk -Project $shipProject -Why 'after push')
+
+    # Code change without docs, then the same shape excused by a commit trailer.
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{ 'src\c.txt' = "c`n" } -Message 'add c without docs'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipTodo -Project $shipProject -Id 'docs' -Why 'code change without docs')
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{ 'src\d.txt' = "d`n" } -Message "add d`n`nDocs: n/a -- fixture has no user-facing change`n"
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    $trailerReport = Assert-ShipOk -Project $shipProject -Why 'code change with trailer'
+    Assert-True -Condition ($trailerReport -match 'exempt by trailer') -Message "The docs check did not attribute the exemption to the trailer: $trailerReport"
+
+    # Missing wiki root.
+    $shipStateText = [IO.File]::ReadAllText($shipState)
+    Write-FixtureFile -Path $shipState -Content ($shipStateText -replace '(?m)^wiki:[^\r\n]*', ('wiki: ' + (Join-Path $loopATempRoot 'no such wiki')))
+    # The brief lives under the wiki root, so a missing root also loses the brief.
+    [void](Assert-ShipTodo -Project $shipProject -Id 'wiki' -Why 'missing wiki root' -AlsoTodo @('brief'))
+    Write-FixtureFile -Path $shipState -Content $shipStateText
+
+    # Brief re-anchored to the wrong commit.
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $previousHead
+    Set-FixturePin -StatePath $shipState -BriefPath '' -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipTodo -Project $shipProject -Id 'brief' -Why 'stale brief anchor')
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+
+    # S9: the generated handoff header. A hand-written file is converted in place,
+    # the header names HEAD, the prose survives, and regenerating is idempotent.
+    $shipHandoff = Join-Path $shipProject 'docs\HANDOFF.md'
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{ 'docs\HANDOFF.md' = "# Handoff`n`nHand-written prose stays.`n" } -Message 'add handoff'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    $writeHandoff = Invoke-ChildPowerShell -Script $repoShipCheck -Arguments @('-Project', $shipProject, '-WriteHandoff')
+    Assert-True -Condition ($writeHandoff.ExitCode -eq 1 -and $writeHandoff.Output -match '(?m)^TODO committed\b' -and $writeHandoff.Output -match '(?m)^OK   handoff\b') -Message "Writing the handoff header did not leave exactly the uncommitted header behind: $($writeHandoff.Output)"
+    $handoffText = [IO.File]::ReadAllText($shipHandoff)
+    $headerMatch = [regex]::Match($handoffText, '(?m)^head: ([0-9a-f]{40})\s*$')
+    Assert-True -Condition ($headerMatch.Success -and $headerMatch.Groups[1].Value -ceq (Invoke-FixtureGit -Root $shipProject -Arguments @('rev-parse', 'HEAD'))) -Message "The generated header does not name HEAD: $handoffText"
+    Assert-True -Condition ($handoffText.StartsWith('<!-- generated') -and $handoffText -match '(?m)^branch: main\s*$' -and $handoffText -match '(?m)^clean: yes\s*$' -and $handoffText -match '(?m)^ahead/behind: origin: ahead 0, behind 0\s*$' -and $handoffText -match '(?m)^plugin_version: n/a\s*$' -and $handoffText -match '(?m)^date: \d{4}-\d{2}-\d{2}\s*$') -Message "The generated header is missing a field: $handoffText"
+    Assert-True -Condition ((($handoffText -split '<!-- handwritten -->').Count -eq 2) -and $handoffText.EndsWith("# Handoff`n`nHand-written prose stays.`n")) -Message "The hand-written part was not preserved below one marker: $handoffText"
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{} -Message 'refresh handoff header'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    $handoffCommitReport = Assert-ShipOk -Project $shipProject -Why 'handoff commit on top of the recorded head'
+    Assert-True -Condition ($handoffCommitReport -match 'HEAD~1') -Message "The handoff check did not recognize the header-only commit: $handoffCommitReport"
+    $rewrite = Invoke-ChildPowerShell -Script $repoShipCheck -Arguments @('-Project', $shipProject, '-WriteHandoff')
+    $rewrittenText = [IO.File]::ReadAllText($shipHandoff)
+    Assert-True -Condition ($rewrittenText -match ('(?m)^head: ' + $shipHead + '\s*$') -and (($rewrittenText -split '<!-- handwritten -->').Count -eq 2) -and $rewrittenText.EndsWith("Hand-written prose stays.`n")) -Message "Regenerating the header duplicated the marker or lost prose: $rewrittenText"
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{} -Message 'refresh handoff header again'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipOk -Project $shipProject -Why 'regenerated handoff committed')
+
+    # Stale handoff header: moving HEAD past the recorded head is drift.
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{ 'src\e.txt' = "e`n"; 'CHANGELOG.md' = "# changelog`n- b`n- e`n" } -Message 'add e with changelog'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipTodo -Project $shipProject -Id 'handoff' -Why 'stale handoff header')
+    [void](Invoke-ChildPowerShell -Script $repoShipCheck -Arguments @('-Project', $shipProject, '-WriteHandoff'))
+    $previousHead = $shipHead
+    $shipHead = Add-FixtureCommit -Root $shipProject -Files @{} -Message 'refresh handoff header after e'
+    [void](Invoke-FixtureGit -Root $shipProject -Arguments @('push', '-q', 'origin', 'main'))
+    Set-FixturePin -StatePath $shipState -BriefPath $shipBrief -BaseSha $previousHead -PinnedSha $shipHead
+    [void](Assert-ShipOk -Project $shipProject -Why 'handoff refreshed after drift')
+
+    # The repository wrapper runs the same checks against this checkout: it must
+    # produce a report with every check id, whatever their status is right now.
+    $repoReport = Invoke-ChildPowerShell -Script $repoShipCheck -Arguments @('-Json')
+    Assert-True -Condition ($repoReport.ExitCode -in @(0, 1)) -Message "scripts/ship-check.ps1 crashed on this repository: $($repoReport.Output)"
+    foreach ($id in $loopACheckIds) { [void](Get-ShipCheckStatus -JsonText $repoReport.Output -Id $id) }
+
+    # S2 fixture: a wiki whose index has one dangling link and whose brief names
+    # one missing hot file, plus a lesson note superseding a note that does not exist.
+    $briefProject = Join-Path $loopATempRoot 'brief project'
+    $briefWiki = Join-Path $loopATempRoot 'brief wiki'
+    $briefAssumptions = Join-Path $briefProject '.loop\ASSUMPTIONS.md'
+    Write-FixtureFile -Path (Join-Path $briefProject 'src\a.txt') -Content "a`n"
+    [void](Invoke-FixtureGit -Root $briefProject -Arguments @('init', '-q'))
+    [void](Invoke-FixtureGit -Root $briefProject -Arguments @('symbolic-ref', 'HEAD', 'refs/heads/main'))
+    $briefHead = Add-FixtureCommit -Root $briefProject -Files @{} -Message 'initial'
+    Write-FixtureFile -Path (Join-Path $briefProject '.git\info\exclude') -Content "/.loop/`n"
+    Write-FixtureFile -Path (Join-Path $briefProject '.loop\STATE.md') -Content (@(
+        'loop: brief-smoke', 'phase: recon', 'round: 0', 'build_round: 0', 'build_step:', 'escalation_kind:',
+        'author: claude', 'reviewer: codex', 'codex_thread:', 'claude_session:', 'resume_fallback:',
+        "wiki: $briefWiki", 'brief: wiki/references/codebase-brief.md', "brief_verified: $briefHead",
+        "base_sha: $briefHead", 'pinned_sha:', 'previous_pinned_sha:',
+        'proof_cmd: powershell.exe -NoProfile -Command exit 0', 'verdict:', 'open:', 'settled:',
+        'format_nudged:', 'mutation_nudged:', 'lock:', 'updated: 2026-01-01T00:00:00-05:00', 'closeout_step:', 'ship_check:'
+    ) -join "`r`n")
+    Write-FixtureFile -Path $briefAssumptions -Content "1. src/a.txt is the entry point. confidence: high. evidence: brief Hot files. [brief]`n2. src/missing.txt owns configuration. confidence: med. evidence: brief Hot files. [brief]`n3. The proof runs under PowerShell. confidence: low. evidence: none. [inferred]`n"
+    Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\_index.md') -Content "# index`n- [Brief](references/codebase-brief.md)`n- [Missing](references/nope.md)`n- [Site](https://example.invalid/page)`n"
+    Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\references\codebase-brief.md') -Content "---`ntitle: brief`ncategory: reference`nverified-against: $briefHead`ncovers:`n  - src/`nvolatility: hot`n---`n# Brief`n## Hot files`n- ``src/a.txt`` entry`n- ``src/missing.txt`` configuration`n## Pointers`n- [index](../_index.md)`n"
+    Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2026-01-01-ll-newer.md') -Content "---`nlesson_kind: lessons-learned`nsupersedes: 2025-12-31-ll-older`n---`nnewer`n"
+
+    # Recon mode: advisory, names both dangling claims, downgrades only the
+    # assumption that cites the missing path, and is idempotent.
+    $recon = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'recon')
+    Assert-True -Condition ($recon.ExitCode -eq 0) -Message "Recon-mode brief check was not advisory: $($recon.Output)"
+    Assert-True -Condition ($recon.Output -match '(?m)^unverified: hot-file src/missing\.txt\b' -and $recon.Output -match '(?m)^unverified: index-link references/nope\.md\b') -Message "Recon output did not name both dangling claims: $($recon.Output)"
+    Assert-True -Condition ($recon.Output -match '(?m)^unverified: supersedes 2025-12-31-ll-older\b') -Message "Recon output did not report the missing supersedes target: $($recon.Output)"
+    Assert-True -Condition ($recon.Output -match '(?m)^OK   hot-file src/a\.txt\b' -and $recon.Output -match '(?m)^OK   proof-cmd powershell\.exe\b' -and $recon.Output -match '(?m)^OK   verified-against ') -Message "Recon output lost a resolving claim: $($recon.Output)"
+    $assumptionsAfter = [IO.File]::ReadAllText($briefAssumptions)
+    Assert-True -Condition ($assumptionsAfter -match '(?m)^1\. src/a\.txt .*\[brief\]\s*$') -Message "A resolving assumption was downgraded: $assumptionsAfter"
+    Assert-True -Condition ($assumptionsAfter -match '(?m)^2\. src/missing\.txt .*\[inferred\]\s*$' -and $assumptionsAfter -notmatch '(?m)^2\. .*\[brief\]') -Message "The assumption citing the missing hot file was not downgraded: $assumptionsAfter"
+    Assert-True -Condition ($assumptionsAfter -match '(?m)^unverified: hot-file src/missing\.txt\b' -and $assumptionsAfter -match '(?m)^unverified: index-link references/nope\.md\b') -Message "ASSUMPTIONS.md did not gain the unverified lines: $assumptionsAfter"
+    $unverifiedCount = @([regex]::Matches($assumptionsAfter, '(?m)^unverified: ')).Count
+    Assert-True -Condition ($unverifiedCount -eq 3) -Message "Expected three unverified lines, found ${unverifiedCount}: $assumptionsAfter"
+    $reconAgain = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'recon')
+    Assert-True -Condition ($reconAgain.ExitCode -eq 0 -and ([IO.File]::ReadAllText($briefAssumptions) -ceq $assumptionsAfter)) -Message 'A second recon-mode run duplicated the unverified lines.'
+
+    # Closeout mode: blocking, exit 1, naming both dangling claims.
+    $closeoutCheck = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'closeout')
+    Assert-True -Condition ($closeoutCheck.ExitCode -eq 1) -Message "Closeout-mode brief check did not fail: $($closeoutCheck.Output)"
+    Assert-True -Condition ($closeoutCheck.Output -match '(?m)^TODO hot-file src/missing\.txt\b' -and $closeoutCheck.Output -match '(?m)^TODO index-link references/nope\.md\b' -and $closeoutCheck.Output -match 'brief-check: FAIL') -Message "Closeout output did not name both dangling claims: $($closeoutCheck.Output)"
+    $closeoutJson = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'closeout', '-Json')
+    $closeoutParsed = $closeoutJson.Output | ConvertFrom-Json
+    Assert-True -Condition ($closeoutJson.ExitCode -eq 1 -and $closeoutParsed.ok -eq $false -and @($closeoutParsed.dangling).Count -eq 3) -Message "Closeout JSON did not list the dangling claims: $($closeoutJson.Output)"
+    Assert-True -Condition ((@($closeoutParsed.dangling | ForEach-Object { $_.path }) -join ',') -ceq 'src/missing.txt,references/nope.md,2025-12-31-ll-older') -Message "Closeout JSON named the wrong claims: $($closeoutJson.Output)"
+
+    # Repairing the wiki makes the same fixture pass in closeout mode.
+    Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\references\nope.md') -Content "# now exists`n"
+    Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2025-12-31-ll-older.md') -Content "---`nlesson_kind: lessons-learned`n---`nolder`n"
+    [void](Add-FixtureCommit -Root $briefProject -Files @{ 'src\missing.txt' = "present`n" } -Message 'add the missing hot file')
+    $repaired = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'closeout')
+    Assert-True -Condition ($repaired.ExitCode -eq 0 -and $repaired.Output -match 'all claims resolve') -Message "A repaired brief still failed the closeout gate: $($repaired.Output)"
+} finally {
+    # Git object files are read-only, so Directory.Delete refuses them; Remove-Item -Force does not.
+    if ([IO.Directory]::Exists($loopATempRoot)) { Remove-Item -LiteralPath $loopATempRoot -Recurse -Force }
+}
+# ---- end loop A ----
+
 Write-Output 'Offline PowerShell 5.1 smoke tests passed.'
 exit 0

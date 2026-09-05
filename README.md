@@ -111,6 +111,8 @@ No verbal recap is required. To inspect the checkpoint mechanically:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <xloop-skill>\scripts\loop-status.ps1 -Project X:\work\project
 ```
 
+Two clerical truth gates sit beside it. `scripts\loop-ship-check.ps1 -Project <project>` reports `committed`, `pushed`, `docs`, `wiki`, `brief`, and `handoff` as `OK` or `TODO` with a one-line fix and exits `0` only when all are `OK`; the closeout `complete` transition refuses until it passes. `scripts\loop-brief-check.ps1 -Project <project> -Mode recon|closeout` checks that the codebase brief's Hot files, Pointers, and `covers` paths exist at HEAD, that every `wiki/_index.md` link resolves, that `verified-against` is reachable, and that the proof command's executable resolves; recon runs it advisory, closeout runs it blocking. For this repository, `.\scripts\ship-check.ps1` runs the ship gate against the checkout and `-WriteHandoff` regenerates the header of `docs/HANDOFF.md`.
+
 The locked v1 choices are:
 
 - Codex builder flag: `--dangerously-bypass-approvals-and-sandbox`
