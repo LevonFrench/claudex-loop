@@ -23,6 +23,10 @@ All notable changes to this custom fork are documented here.
 
 ### Fixed
 
+- xloop: final live acceptance now rejects an inspection approval whose wrapper metadata records failure or a different verdict, covering a driver replacing a blocked inspection with a bare approval.
+
+- xloop: captured Windows Codex read-intent summons now explicitly route eligible approval requests to automatic review, retaining workspace-write and the packet guards on both fresh and resumed calls. A live inspector previously could not read its evidence under the CLI's implicit approval defaults.
+- xloop: the live-driver prompt now explicitly requires polling running wrapper sessions, generating inspection diffs first, preserving failed inspection artifacts, and completing closeout before reporting done.
 - xloop: preserve supersedes validation for Windows CRLF notes while keeping blank fields from consuming the next line; the closeout smoke checks the same dangling references under both line endings.
 - xloop: the quota classifier did not recognize the Claude CLI wording `You've hit your session limit`, so a Claude session-limit refusal was filed as a generic tool failure instead of `quota` (found by the second live acceptance run). Session limits now classify as quota and cross to the alternate provider where the role allows it.
 - xloop: the write-mode soft cap applied to every write summon, so a closeout, which writes to the wiki root and emits nothing until it finishes, was killed at 301 s in the first live acceptance run. The soft cap now applies only to builder reports (`b<N>-report.md`); closeout keeps the single hard cap.

@@ -159,6 +159,7 @@ function Get-DriverCommand {
     } else {
         "Run the xloop skill on this repository ($Project). Request: $RequestText Nobody will answer questions or approve anything: apply every Default-if-silent and your own Recommended ruling, answer every batch yourself with defaults, skip the closing rating, and keep going until .loop/STATE.md reads phase: done. Do not stop to report progress."
     }
+    $task += ' If a shell invocation returns a running session ID, poll that session until it finishes; never launch a duplicate wrapper to obtain its exit code. Generate the pinned diff before summoning inspection. Preserve reviewer and inspector outputs: never replace a failed, blocked, or malformed inspection with your own approval. Follow the bounded nudge and escalation rules, and stop with a failure report if policy still blocks the required inspection. Reaching closeout is not completion: invoke closeout and finish its ship gate before reporting done.'
     if ($Author -eq 'claude') {
         $exe = Resolve-AgentExecutable -Name 'claude' -ExplicitPath $ClaudePath
         return [pscustomobject]@{ FileName = $exe; Arguments = @('-p', ('Use the xloop skill (/xloop). ' + $task), '--dangerously-skip-permissions', '--output-format', 'text') }
@@ -444,6 +445,9 @@ function Invoke-Scenario {
             $final = Read-State -Path $statePath
             $phase = Get-LoopStateValue -Fields $final -Key 'phase'
             if ($phase -ne 'done') { throw "phase is $phase, not done; see driver-2.stderr.log" }
+            $inspectionPath = Join-Path $loopRoot ('build\b' + (Get-StateInt $final 'build_round') + '-inspect.md')
+            $inspection = Invoke-Child -Script (Join-Path $PSScriptRoot 'validate-live-inspection.ps1') -Arguments @('-InspectionPath', $inspectionPath)
+            if ($inspection.ExitCode -ne 0) { throw "inspection evidence failed: $($inspection.Output)" }
             $ship = Invoke-Child -Script $shipScript -Arguments @('-Project', $project)
             if ($ship.ExitCode -ne 0) { throw "ship check failed:`n$($ship.Output)" }
             $wikiValue = Get-LoopStateValue -Fields $final -Key 'wiki'

@@ -461,6 +461,7 @@ try {
             Assert-True -Condition ($readIntent.ExitCode -eq 0) -Message "Read-intent codex call failed: $($readIntent.Output)"
             $freshArgs = [IO.File]::ReadAllText($argsDump)
             Assert-True -Condition (Test-ArgumentPair -Dump $freshArgs -Name '-s' -Value 'workspace-write') -Message "Windows read-intent did not map to the workspace-write sandbox: $freshArgs"
+            Assert-True -Condition ((Test-ArgumentPair -Dump $freshArgs -Name '-c' -Value 'approval_policy="on-request"') -and (Test-ArgumentPair -Dump $freshArgs -Name '-c' -Value 'approvals_reviewer="auto_review"')) -Message 'Fresh Windows read-intent lost its automatic approval-review route.'
             Assert-True -Condition ($freshArgs -notmatch 'dangerously') -Message 'Read-intent selected a dangerous write flag.'
 
             $env:XLOOP_MOCK_MODE = 'bom'
@@ -468,12 +469,14 @@ try {
             Assert-True -Condition ($resumeIntent.ExitCode -eq 0) -Message "Resumed read-intent codex call failed: $($resumeIntent.Output)"
             $resumeArgs = [IO.File]::ReadAllText($argsDump)
             Assert-True -Condition ($resumeArgs -match 'sandbox_mode="workspace-write"') -Message "Resumed read-intent did not map the sandbox: $resumeArgs"
+            Assert-True -Condition ((Test-ArgumentPair -Dump $resumeArgs -Name '-c' -Value 'approval_policy="on-request"') -and (Test-ArgumentPair -Dump $resumeArgs -Name '-c' -Value 'approvals_reviewer="auto_review"')) -Message 'Resumed Windows read-intent lost its automatic approval-review route.'
             Assert-True -Condition ($resumeArgs -notmatch 'dangerously') -Message 'Resumed read-intent selected a dangerous write flag.'
 
             $env:XLOOP_MOCK_MODE = 'bom'
             $writeIntent = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\sandbox-write.md', '-Sandbox', 'write', '-TimeoutSec', '5')
             Assert-True -Condition ($writeIntent.ExitCode -eq 0) -Message "Write-mode codex call failed: $($writeIntent.Output)"
             Assert-True -Condition ([IO.File]::ReadAllText($argsDump) -match 'dangerously-bypass-approvals-and-sandbox') -Message 'Write mode did not use the locked protocol flag.'
+            Assert-True -Condition ([IO.File]::ReadAllText($argsDump) -notmatch 'approvals_reviewer|approval_policy') -Message 'Read-intent approval settings leaked into the locked write-mode invocation.'
 
             $env:XLOOP_MOCK_MODE = 'bom'
             $modelRun = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\model.md', '-Model', 'gpt-5.1-codex', '-TimeoutSec', '5')
@@ -1889,6 +1892,21 @@ try {
     Assert-True -Condition ($emptyAppend.ExitCode -eq 0) -Message "An append to an empty declared append-only file was rejected: $($emptyAppend.Output)"
     Assert-True -Condition ([IO.File]::ReadAllText($emptyInbox) -match 'durable note from closeout') -Message 'The append to an empty inbox did not survive.'
     Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
+
+    # A driver must not turn a failed or revised inspector output into approval.
+    $inspectionCheck = Join-Path $PSScriptRoot 'validate-live-inspection.ps1'
+    $inspectionFixture = Join-Path $loopDRoot 'inspection-approval.md'
+    [IO.File]::WriteAllText($inspectionFixture, "VERDICT: APPROVE`n", $loopDUtf8)
+    foreach ($inspectionCase in @(
+        @{ Exit = 2; Verdict = 'RESULT: FAIL'; Pass = $false },
+        @{ Exit = 0; Verdict = 'VERDICT: REVISE'; Pass = $false },
+        @{ Exit = 0; Verdict = 'VERDICT: APPROVE'; Pass = $true }
+    )) {
+        $inspectionMeta = @{ tool = 'codex'; exit_code = $inspectionCase.Exit; expected_terminator = 'verdict'; terminator = $inspectionCase.Verdict } | ConvertTo-Json
+        [IO.File]::WriteAllText(($inspectionFixture + '.meta.json'), $inspectionMeta, $loopDUtf8)
+        $inspectionResult = Invoke-ChildPowerShell -Script $inspectionCheck -Arguments @('-InspectionPath', $inspectionFixture)
+        Assert-True -Condition (($inspectionResult.ExitCode -eq 0) -eq $inspectionCase.Pass) -Message "Inspection metadata check misclassified exit $($inspectionCase.Exit), $($inspectionCase.Verdict): $($inspectionResult.Output)"
+    }
 
     # S4: the live harness is gated and its plumbing is proved offline. Without
     # XLOOP_LIVE it skips with exit 0; -DryRun runs a whole mock loop per

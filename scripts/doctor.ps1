@@ -77,7 +77,7 @@ $checks = [ordered]@{
         discovery = $codexAgent.Discovery
         error = $codexAgent.Error
         version = if ($codex) { (& $codex.Source --version 2>&1 | Out-String).Trim() } else { $null }
-        flags = if ($codex) { Test-HelpTokens -Executable $codex.Source -Arguments @('exec', '--help') -Tokens @('--sandbox', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--add-dir', '--output-schema', '--output-last-message') } else { $null }
+        flags = if ($codex) { Test-HelpTokens -Executable $codex.Source -Arguments @('exec', '--help') -Tokens @('--sandbox', '--approve-for-me', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--add-dir', '--output-schema', '--output-last-message') } else { $null }
     }
     claude = [ordered]@{
         ok = ($null -ne $claude)

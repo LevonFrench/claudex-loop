@@ -165,6 +165,12 @@ try {
             '-c', 'features.apps=false',
             '-c', 'agents.enabled=false'
         )
+        if ($Sandbox -eq 'read-only' -and (Test-LoopWindows)) {
+            # Captured Windows reviewers cannot answer interactive approvals.
+            # Keep workspace-write and route eligible requests through review,
+            # including exec resume, which has no --approve-for-me switch.
+            $hardening += @('-c', 'approval_policy="on-request"', '-c', 'approvals_reviewer="auto_review"')
+        }
         if ($additionalDirectory) { $hardening += @('--add-dir', $additionalDirectory) }
         if ($Model) { $hardening = @('-m', $Model) + $hardening }
         $arguments = if ($kind -eq 'resume') {
