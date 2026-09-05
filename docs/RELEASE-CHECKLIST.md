@@ -13,6 +13,7 @@
 - [ ] Run `bash ./tests/run-git-bash.sh` from Git Bash.
 - [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`.
 - [ ] Run the skill validator and `git diff --check`.
+- [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\ship-check.ps1`. Each line is `OK` or `TODO` with its fix (`committed`, `pushed`, `docs`, `wiki`, `brief`, `handoff`); `TODO pushed` is expected until the branch is pushed, and every other line must be `OK`.
 
 ## Peer Sessions plugin
 
@@ -70,6 +71,8 @@ Each gate below is classified. A **blocking** gate must pass before a stable tag
 ## Publication
 
 - [ ] Confirm the release branch contains only intentional files.
+- [ ] Regenerate the handoff header with `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\ship-check.ps1 -WriteHandoff`, review the hand-written part of `docs/HANDOFF.md` below the `<!-- handwritten -->` marker, and commit the header refresh on its own so the `handoff` check stays `OK`.
 - [ ] Push the release branch to the public fork.
 - [ ] Wait for Windows CI.
+- [ ] Run `.\scripts\ship-check.ps1` once more on the pushed branch; it must exit `0` at tag time.
 - [ ] Create a stable tag and GitHub release only after both authenticated acceptance loops pass.

@@ -938,3 +938,768 @@ function Invoke-VisibleProcess {
         }
     }
 }
+
+# ---------------------------------------------------------------------------
+# Truth gates: shared parsers and the OK/TODO report shape used by
+# loop-ship-check.ps1, loop-brief-check.ps1, scripts/ship-check.ps1, and the
+# closeout gate in loop-step.ps1. Everything here is clerical: it reads files
+# and Git, never judges content, and never calls a model.
+# ---------------------------------------------------------------------------
+
+function Invoke-LoopGit {
+    <#
+    Runs one Git command against a project root and returns its exit code and
+    trimmed text instead of throwing. Dubious ownership is the one failure that
+    must stop with the exact remediation, because every later check would lie.
+    #>
+    param([string]$Root, [string[]]$Arguments)
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& git -C $Root @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        return [pscustomobject]@{ ExitCode = 127; Text = '' }
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+    if ($exitCode -ne 0 -and $text -match 'detected dubious ownership') {
+        throw "Git rejected repository ownership. Run this yourself, then retry:`ngit config --global --add safe.directory `"$($Root -replace '\\','/')`""
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Text = $text }
+}
+
+function Read-LoopStateFields {
+    <#
+    BOM-tolerant STATE.md parser shared by the checkers. Returns $null when the
+    file does not exist so a project without a loop can still be ship-checked.
+    #>
+    param([string]$Path)
+
+    if (-not [System.IO.File]::Exists($Path)) { return $null }
+    $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+    $fields = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    foreach ($line in ($text -split "`r?`n")) {
+        $match = [regex]::Match($line, '^(?<key>[a-z][a-z0-9_]*):\s?(?<value>.*)$')
+        if (-not $match.Success) { continue }
+        $key = $match.Groups['key'].Value
+        if ($fields.Contains($key)) { throw "Duplicate STATE.md field: $key" }
+        $fields[$key] = $match.Groups['value'].Value.Trim()
+    }
+    return $fields
+}
+
+function Get-LoopStateValue {
+    param($Fields, [string]$Key)
+    if ($null -eq $Fields) { return '' }
+    if (-not $Fields.Contains($Key)) { return '' }
+    return [string]$Fields[$Key]
+}
+
+function New-LoopCheck {
+    param(
+        [string]$Id,
+        [bool]$Ok,
+        [AllowEmptyString()][string]$Detail = '',
+        [AllowEmptyString()][string]$Fix = ''
+    )
+    $status = if ($Ok) { 'OK' } else { 'TODO' }
+    return [pscustomobject]@{ id = $Id; status = $status; detail = $Detail; fix = $Fix }
+}
+
+function Format-LoopCheckReport {
+    <#
+    One line per check: `OK   id  detail` or `TODO id  detail  fix: ...`. The id
+    is the stable token that tests and drivers match on.
+    #>
+    param([object[]]$Checks)
+
+    $lines = foreach ($check in $Checks) {
+        $suffix = ''
+        if ($check.detail) { $suffix = '  ' + $check.detail }
+        if ($check.status -eq 'OK') {
+            'OK   ' + $check.id + $suffix
+        } else {
+            if ($check.fix) { $suffix += '  fix: ' + $check.fix }
+            'TODO ' + $check.id + $suffix
+        }
+    }
+    return (@($lines) -join "`n")
+}
+
+function Test-LoopShaMatch {
+    # Two abbreviated or full SHAs name the same commit when one is a prefix of the other.
+    param([AllowEmptyString()][string]$Left, [AllowEmptyString()][string]$Right)
+    if (-not $Left -or -not $Right) { return $false }
+    $l = $Left.Trim().ToLowerInvariant()
+    $r = $Right.Trim().ToLowerInvariant()
+    if ($l -notmatch '^[0-9a-f]{7,40}$' -or $r -notmatch '^[0-9a-f]{7,40}$') { return $false }
+    if ($l.Length -le $r.Length) { return $r.StartsWith($l) }
+    return $l.StartsWith($r)
+}
+
+function Test-LoopGitRepository {
+    param([string]$Root)
+    $probe = Invoke-LoopGit -Root $Root -Arguments @('rev-parse', '--git-dir')
+    return ($probe.ExitCode -eq 0)
+}
+
+function Test-LoopPathAtHead {
+    <#
+    True when a project-relative path (file or directory) exists in the HEAD tree.
+    Outside a Git repository the working tree is the only truth available.
+    #>
+    param([string]$Root, [string]$RelativePath, [bool]$IsGit)
+
+    $normalized = ($RelativePath -replace '\\', '/')
+    while ($normalized.StartsWith('./')) { $normalized = $normalized.Substring(2) }
+    $normalized = $normalized.TrimEnd('/')
+    if (-not $normalized) { return $false }
+    if ($IsGit) {
+        $probe = Invoke-LoopGit -Root $Root -Arguments @('cat-file', '-e', ('HEAD:' + $normalized))
+        return ($probe.ExitCode -eq 0)
+    }
+    $full = Join-Path $Root ($normalized -replace '/', '\')
+    return (Test-Path -LiteralPath $full)
+}
+
+function Get-LoopMarkdownPaths {
+    <#
+    Extracts path-like tokens from one Markdown line: backticked spans, link
+    targets, then a bare first token after a bullet. URLs and anchors are skipped
+    and `path:line` references lose their line suffix.
+    #>
+    param([AllowEmptyString()][string]$Line)
+
+    $found = New-Object System.Collections.Generic.List[string]
+    foreach ($match in [regex]::Matches($Line, '`([^`]+)`')) { $found.Add($match.Groups[1].Value) }
+    foreach ($match in [regex]::Matches($Line, '\[[^\]]*\]\(([^)\s]+)\)')) { $found.Add($match.Groups[1].Value) }
+    if ($found.Count -eq 0) {
+        $bullet = [regex]::Match($Line, '^\s*(?:[-*+]|\d+[.)])\s+(\S+)')
+        if ($bullet.Success) { $found.Add($bullet.Groups[1].Value) }
+    }
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $found) {
+        $token = $candidate.Trim().TrimEnd(':', ',', ';', '.')
+        if ($token -match '^[a-z][a-z0-9+.-]*://' -or $token.StartsWith('#') -or $token.StartsWith('mailto:')) { continue }
+        $token = $token -replace '#.*$', ''
+        $token = $token -replace ':\d+(?:-\d+)?$', ''
+        if (-not $token) { continue }
+        if ($token -notmatch '[\\/.]') { continue }
+        if ($token -match '\s') { continue }
+        if (-not $paths.Contains($token)) { $paths.Add($token) }
+    }
+    return $paths.ToArray()
+}
+
+function Get-LoopBriefModel {
+    <#
+    Parses the codebase brief into the claims the truth gate checks: the
+    `verified-against` SHA, `covers` paths, and the paths named under the Hot
+    files and Pointers sections. Prose is never interpreted, only path tokens.
+    #>
+    param([string]$Path)
+
+    $model = [ordered]@{
+        exists = $false
+        verified_against = ''
+        covers = @()
+        hot_files = @()
+        pointers = @()
+    }
+    if (-not [System.IO.File]::Exists($Path)) { return [pscustomobject]$model }
+    $model.exists = $true
+    $lines = @([System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF) -split "`r?`n")
+
+    $index = 0
+    $covers = New-Object System.Collections.Generic.List[string]
+    if ($lines.Count -gt 0 -and $lines[0].Trim() -eq '---') {
+        $index = 1
+        $inCovers = $false
+        while ($index -lt $lines.Count -and $lines[$index].Trim() -ne '---') {
+            $line = $lines[$index]
+            $index++
+            if ($line -match '^verified-against:\s*(\S*)\s*$') { $model.verified_against = $Matches[1].Trim('"', "'"); $inCovers = $false; continue }
+            if ($line -match '^covers:\s*(.*)$') {
+                $inline = $Matches[1].Trim()
+                $inCovers = $true
+                if ($inline) {
+                    $inCovers = $false
+                    foreach ($item in ($inline.TrimStart('[').TrimEnd(']') -split ',')) {
+                        $value = $item.Trim().Trim('"', "'")
+                        if ($value) { $covers.Add($value) }
+                    }
+                }
+                continue
+            }
+            if ($inCovers) {
+                if ($line -match '^\s+-\s*(.+)$') { $value = $Matches[1].Trim().Trim('"', "'"); if ($value) { $covers.Add($value) }; continue }
+                if ($line -match '^\S') { $inCovers = $false }
+            }
+        }
+        if ($index -lt $lines.Count) { $index++ }
+    }
+    $model.covers = $covers.ToArray()
+
+    $section = ''
+    $hot = New-Object System.Collections.Generic.List[string]
+    $pointers = New-Object System.Collections.Generic.List[string]
+    for (; $index -lt $lines.Count; $index++) {
+        $line = $lines[$index]
+        $heading = [regex]::Match($line, '^#{1,6}\s*(.+?)\s*#*\s*$')
+        if ($heading.Success) {
+            $title = $heading.Groups[1].Value.ToLowerInvariant()
+            if ($title -match 'hot files') { $section = 'hot' }
+            elseif ($title -match 'pointers') { $section = 'pointers' }
+            else { $section = '' }
+            continue
+        }
+        if (-not $section) { continue }
+        foreach ($claimPath in (Get-LoopMarkdownPaths -Line $line)) {
+            if ($section -eq 'hot') { if (-not $hot.Contains($claimPath)) { $hot.Add($claimPath) } }
+            else { if (-not $pointers.Contains($claimPath)) { $pointers.Add($claimPath) } }
+        }
+    }
+    $model.hot_files = $hot.ToArray()
+    $model.pointers = $pointers.ToArray()
+    return [pscustomobject]$model
+}
+
+function Resolve-LoopWikiRoot {
+    # STATE `wiki:` may be absolute, project-relative, or blank (no-wiki mode defaults to <project>/.wiki).
+    param([string]$Root, [AllowEmptyString()][string]$Wiki)
+
+    $value = if ($Wiki) { $Wiki } else { '.wiki' }
+    if (-not [System.IO.Path]::IsPathRooted($value)) { $value = Join-Path $Root $value }
+    return [System.IO.Path]::GetFullPath($value)
+}
+
+function Get-LoopProofExecutable {
+    <#
+    Resolves the executable named by a proof command without running it. A quoted
+    or path-shaped first token is checked on disk under the project; a bare name
+    is resolved like the shell would.
+    #>
+    param([string]$Root, [AllowEmptyString()][string]$ProofCmd)
+
+    $command = $ProofCmd.Trim()
+    if (-not $command) { return [pscustomobject]@{ Token = ''; Resolved = ''; Ok = $false } }
+    $token = ''
+    if ($command.StartsWith('"')) {
+        $end = $command.IndexOf('"', 1)
+        $token = if ($end -gt 1) { $command.Substring(1, $end - 1) } else { $command.Trim('"') }
+    } elseif ($command.StartsWith("'")) {
+        $end = $command.IndexOf("'", 1)
+        $token = if ($end -gt 1) { $command.Substring(1, $end - 1) } else { $command.Trim("'") }
+    } else {
+        $token = ($command -split '\s+')[0]
+    }
+    $token = $token.TrimStart('&').Trim()
+    if (-not $token) { return [pscustomobject]@{ Token = ''; Resolved = ''; Ok = $false } }
+
+    if ($token -match '[\\/]') {
+        $candidate = if ([System.IO.Path]::IsPathRooted($token)) { $token } else { Join-Path $Root $token }
+        $candidates = @($candidate)
+        if ([System.IO.Path]::GetExtension($candidate) -eq '') {
+            foreach ($extension in @('.exe', '.cmd', '.bat', '.ps1')) { $candidates += ($candidate + $extension) }
+        }
+        foreach ($item in $candidates) {
+            if (Test-Path -LiteralPath $item -PathType Leaf) { return [pscustomobject]@{ Token = $token; Resolved = $item; Ok = $true } }
+        }
+        return [pscustomobject]@{ Token = $token; Resolved = ''; Ok = $false }
+    }
+
+    $found = Get-Command -Name $token -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $found) { return [pscustomobject]@{ Token = $token; Resolved = ''; Ok = $false } }
+    $resolved = $found.Name
+    $sourceProperty = $found.PSObject.Properties['Source']
+    if ($null -ne $sourceProperty -and $sourceProperty.Value) { $resolved = [string]$sourceProperty.Value }
+    return [pscustomobject]@{ Token = $token; Resolved = $resolved; Ok = $true }
+}
+
+function Get-LoopHandoffHeader {
+    <#
+    Reads the generated header at the top of a handoff file: the block between the
+    `<!-- generated` line and the `<!-- handwritten -->` marker, as key: value
+    lines inside a fence. Returns $null when the file has no generated header.
+    #>
+    param([string]$Path)
+
+    if (-not [System.IO.File]::Exists($Path)) { return $null }
+    $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+    $lines = @($text -split "`r?`n")
+    if ($lines.Count -eq 0 -or $lines[0] -notmatch '^<!--\s*generated') { return $null }
+    $fields = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    $markerFound = $false
+    foreach ($line in $lines) {
+        if ($line.Trim() -eq '<!-- handwritten -->') { $markerFound = $true; break }
+        $match = [regex]::Match($line, '^(?<key>[a-z][a-z0-9_/-]*):\s?(?<value>.*)$')
+        if ($match.Success -and -not $fields.Contains($match.Groups['key'].Value)) {
+            $fields[$match.Groups['key'].Value] = $match.Groups['value'].Value.Trim()
+        }
+    }
+    if (-not $markerFound) { return $null }
+    return $fields
+}
+
+function Get-LoopPluginVersion {
+    <#
+    Reads `"version"` from each manifest that exists and reports one value when
+    they agree, `mismatch (...)` when they do not, and `n/a` when none exist.
+    #>
+    param([string]$Root, [string[]]$Manifests)
+
+    $versions = New-Object System.Collections.Generic.List[string]
+    foreach ($relative in $Manifests) {
+        $full = Join-Path $Root ($relative -replace '/', '\')
+        if (-not [System.IO.File]::Exists($full)) { continue }
+        $match = [regex]::Match([System.IO.File]::ReadAllText($full), '"version"\s*:\s*"([^"]+)"')
+        $versions.Add($(if ($match.Success) { $match.Groups[1].Value } else { '?' }))
+    }
+    if ($versions.Count -eq 0) { return 'n/a' }
+    $distinct = @($versions | Sort-Object -Unique)
+    if ($distinct.Count -eq 1) { return $distinct[0] }
+    return ('mismatch (' + ($versions -join ', ') + ')')
+}
+
+function Write-LoopHandoffHeader {
+    <#
+    Rewrites the generated header at the top of a handoff file. Everything below
+    the `<!-- handwritten -->` marker is preserved apart from line-ending
+    normalization; a file without the marker keeps its whole existing text as the
+    handwritten part. Returns the HEAD SHA that was recorded.
+    #>
+    param(
+        [string]$Root,
+        [string]$Path,
+        [string]$PluginVersion = 'n/a'
+    )
+
+    $head = Invoke-LoopGit -Root $Root -Arguments @('rev-parse', 'HEAD')
+    if ($head.ExitCode -ne 0) { throw "Cannot read HEAD for the handoff header: $($head.Text)" }
+    $branchProbe = Invoke-LoopGit -Root $Root -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')
+    $branch = if ($branchProbe.ExitCode -eq 0 -and $branchProbe.Text) { $branchProbe.Text } else { 'HEAD' }
+
+    $relativeHandoff = ''
+    if ($Path.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+        $relativeHandoff = ($Path.Substring($Root.Length).TrimStart('\', '/') -replace '\\', '/')
+    }
+    $status = Invoke-LoopGit -Root $Root -Arguments @('status', '--porcelain')
+    $dirty = @()
+    if ($status.Text) {
+        # The header itself will dirty the handoff file, so that one path is not counted.
+        $dirty = @($status.Text -split "`n" | Where-Object { $_ -and $_.Length -gt 3 -and (-not $relativeHandoff -or $_.Substring(3).Trim().Trim('"') -ne $relativeHandoff) })
+    }
+    $clean = if ($dirty.Count -eq 0) { 'yes' } else { 'no (' + $dirty.Count + ' path(s) modified or untracked)' }
+
+    $remoteLines = New-Object System.Collections.Generic.List[string]
+    $remotes = Invoke-LoopGit -Root $Root -Arguments @('remote')
+    if ($remotes.ExitCode -eq 0 -and $remotes.Text) {
+        foreach ($remote in ($remotes.Text -split "`n")) {
+            $name = $remote.Trim()
+            if (-not $name) { continue }
+            $ref = "refs/remotes/$name/$branch"
+            $refProbe = Invoke-LoopGit -Root $Root -Arguments @('rev-parse', '--verify', '--quiet', $ref)
+            if ($refProbe.ExitCode -ne 0) { $remoteLines.Add("$name`: no $branch ref"); continue }
+            $count = Invoke-LoopGit -Root $Root -Arguments @('rev-list', '--left-right', '--count', "HEAD...$ref")
+            $parts = @($count.Text -split '\s+')
+            if ($count.ExitCode -eq 0 -and $parts.Count -ge 2) { $remoteLines.Add("$name`: ahead $($parts[0]), behind $($parts[1])") }
+            else { $remoteLines.Add("$name`: unknown") }
+        }
+    }
+    if ($remoteLines.Count -eq 0) { $remoteLines.Add('none') }
+
+    $existing = if ([System.IO.File]::Exists($Path)) { [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF) } else { '' }
+    $existing = $existing -replace "`r`n", "`n"
+    $marker = '<!-- handwritten -->'
+    $markerIndex = $existing.IndexOf($marker)
+    $handwritten = if ($markerIndex -ge 0) { $existing.Substring($markerIndex + $marker.Length).TrimStart("`n") } else { $existing.TrimStart("`n") }
+
+    $header = @(
+        '<!-- generated by scripts/ship-check.ps1 -WriteHandoff; do not edit above the handwritten marker -->',
+        '```text',
+        ('head: ' + $head.Text),
+        ('branch: ' + $branch),
+        ('clean: ' + $clean),
+        ('ahead/behind: ' + ($remoteLines -join '; ')),
+        ('plugin_version: ' + $PluginVersion),
+        ('date: ' + (Get-Date -Format 'yyyy-MM-dd')),
+        '```',
+        $marker,
+        ''
+    ) -join "`n"
+    Write-Utf8NoBomAtomic -Path $Path -Content ($header + $handwritten)
+    return $head.Text
+}
+
+function Invoke-LoopShipCheck {
+    <#
+    The ship gate. Six clerical checks, each OK or TODO with a one-line fix. The
+    result is `ok` only when every check is OK. STATE.md is optional: a project
+    without a loop is checked against HEAD and its own Git state.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Project,
+        [AllowEmptyString()][string]$PinnedSha = '',
+        [AllowEmptyString()][string]$BaseSha = '',
+        [AllowEmptyString()][string]$HandoffPath = ''
+    )
+
+    $root = Get-LoopProjectRoot -Project $Project
+    $state = Read-LoopStateFields -Path (Join-Path (Join-Path $root '.loop') 'STATE.md')
+    $hasState = ($null -ne $state)
+    $isGit = Test-LoopGitRepository -Root $root
+    $checks = New-Object System.Collections.Generic.List[object]
+
+    $head = ''
+    if ($isGit) {
+        $headProbe = Invoke-LoopGit -Root $root -Arguments @('rev-parse', 'HEAD')
+        if ($headProbe.ExitCode -eq 0) { $head = $headProbe.Text.ToLowerInvariant() }
+    }
+    $pinned = if ($PinnedSha) { $PinnedSha } else { Get-LoopStateValue -Fields $state -Key 'pinned_sha' }
+    $pinnedNote = ''
+    if (-not $pinned) { $pinned = $head; $pinnedNote = 'no pinned_sha; using HEAD' }
+    $base = if ($BaseSha) { $BaseSha } else { Get-LoopStateValue -Fields $state -Key 'base_sha' }
+    $shortPinned = if ($pinned) { $pinned.Substring(0, [Math]::Min(7, $pinned.Length)) } else { '' }
+
+    # committed
+    if (-not $isGit) {
+        $checks.Add((New-LoopCheck -Id 'committed' -Ok $false -Detail 'not a Git repository' -Fix 'git init && git add -A && git commit'))
+    } else {
+        $status = Invoke-LoopGit -Root $root -Arguments @('status', '--porcelain')
+        if ($status.ExitCode -ne 0) {
+            $checks.Add((New-LoopCheck -Id 'committed' -Ok $false -Detail ('git status failed: ' + $status.Text) -Fix 'git add -A && git commit'))
+        } elseif ($status.Text) {
+            $count = @($status.Text -split "`n").Count
+            $checks.Add((New-LoopCheck -Id 'committed' -Ok $false -Detail ("$count path(s) modified or untracked") -Fix 'git add -A && git commit'))
+        } else {
+            $checks.Add((New-LoopCheck -Id 'committed' -Ok $true -Detail 'worktree clean'))
+        }
+    }
+
+    # pushed
+    if (-not $isGit -or -not $pinned) {
+        $checks.Add((New-LoopCheck -Id 'pushed' -Ok $false -Detail 'no commit to compare' -Fix 'git push <remote> <branch>'))
+    } else {
+        $upstream = Invoke-LoopGit -Root $root -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
+        if ($upstream.ExitCode -ne 0 -or -not $upstream.Text) {
+            # D1: a local-only project is legitimate; the check must not invent a remote.
+            $checks.Add((New-LoopCheck -Id 'pushed' -Ok $true -Detail 'no upstream configured (local-only branch)'))
+        } else {
+            $ancestor = Invoke-LoopGit -Root $root -Arguments @('merge-base', '--is-ancestor', $pinned, $upstream.Text)
+            $branchProbe = Invoke-LoopGit -Root $root -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')
+            $remoteName = ($upstream.Text -split '/')[0]
+            $fix = "git push $remoteName $($branchProbe.Text)"
+            if ($ancestor.ExitCode -eq 0) {
+                $checks.Add((New-LoopCheck -Id 'pushed' -Ok $true -Detail ("pinned $shortPinned is on $($upstream.Text) (local tracking ref; fetch first for the remote truth)")))
+            } else {
+                $checks.Add((New-LoopCheck -Id 'pushed' -Ok $false -Detail ("pinned $shortPinned is not on $($upstream.Text)") -Fix $fix))
+            }
+        }
+    }
+
+    # docs
+    if (-not $isGit) {
+        $checks.Add((New-LoopCheck -Id 'docs' -Ok $true -Detail 'not a Git repository; no range to check'))
+    } elseif (-not $base -or -not $pinned) {
+        $checks.Add((New-LoopCheck -Id 'docs' -Ok $true -Detail 'no base_sha..pinned_sha range to check'))
+    } else {
+        $changed = Invoke-LoopGit -Root $root -Arguments @('diff', '--name-only', "$base..$pinned")
+        if ($changed.ExitCode -ne 0) {
+            $checks.Add((New-LoopCheck -Id 'docs' -Ok $false -Detail ("cannot diff $base..$pinned`: " + $changed.Text) -Fix 'fix base_sha/pinned_sha in STATE.md'))
+        } else {
+            $files = @($changed.Text -split "`n" | Where-Object { $_ })
+            $code = @($files | Where-Object { $_ -notmatch '^(docs|tests|\.loop)/' })
+            $docsTouched = @($files | Where-Object { $_ -in @('CHANGELOG.md', 'README.md') })
+            if ($code.Count -eq 0) {
+                $checks.Add((New-LoopCheck -Id 'docs' -Ok $true -Detail 'no code changes in range'))
+            } elseif ($docsTouched.Count -gt 0) {
+                $checks.Add((New-LoopCheck -Id 'docs' -Ok $true -Detail (($docsTouched -join ', ') + ' changed with ' + $code.Count + ' code path(s)')))
+            } else {
+                $log = Invoke-LoopGit -Root $root -Arguments @('log', '--format=%B', "$base..$pinned")
+                $trailer = [regex]::Match($log.Text, '(?m)^Docs:\s*n/a\s*(?:\u2014|\u2013|-+)\s*(?<reason>\S.*)$')
+                if ($trailer.Success) {
+                    $checks.Add((New-LoopCheck -Id 'docs' -Ok $true -Detail ('exempt by trailer: ' + $trailer.Groups['reason'].Value.Trim())))
+                } else {
+                    $checks.Add((New-LoopCheck -Id 'docs' -Ok $false -Detail ($code.Count.ToString() + ' code path(s) changed without CHANGELOG.md or README.md') -Fix 'add a CHANGELOG entry or a Docs: n/a trailer'))
+                }
+            }
+        }
+    }
+
+    # wiki
+    if (-not $hasState) {
+        $checks.Add((New-LoopCheck -Id 'wiki' -Ok $true -Detail 'no .loop/STATE.md; not applicable'))
+    } else {
+        $wikiValue = Get-LoopStateValue -Fields $state -Key 'wiki'
+        $wikiRoot = Resolve-LoopWikiRoot -Root $root -Wiki $wikiValue
+        $indexPath = Join-Path (Join-Path $wikiRoot 'wiki') '_index.md'
+        if (-not [System.IO.Directory]::Exists($wikiRoot)) {
+            $checks.Add((New-LoopCheck -Id 'wiki' -Ok $false -Detail ("wiki root does not exist: $wikiRoot") -Fix 'initialize the spoke or fix the path'))
+        } elseif (-not [System.IO.File]::Exists($indexPath)) {
+            $checks.Add((New-LoopCheck -Id 'wiki' -Ok $false -Detail ("missing wiki/_index.md under $wikiRoot") -Fix 'initialize the spoke or fix the path'))
+        } else {
+            $note = if ($wikiValue) { "root $wikiRoot" } else { "root defaulted to $wikiRoot" }
+            $checks.Add((New-LoopCheck -Id 'wiki' -Ok $true -Detail $note))
+        }
+    }
+
+    # brief
+    if (-not $hasState) {
+        $checks.Add((New-LoopCheck -Id 'brief' -Ok $true -Detail 'no .loop/STATE.md; not applicable'))
+    } else {
+        $wikiRoot = Resolve-LoopWikiRoot -Root $root -Wiki (Get-LoopStateValue -Fields $state -Key 'wiki')
+        $briefValue = Get-LoopStateValue -Fields $state -Key 'brief'
+        if (-not $briefValue) { $briefValue = 'wiki/references/codebase-brief.md' }
+        $briefPath = if ([System.IO.Path]::IsPathRooted($briefValue)) { $briefValue } else { Join-Path $wikiRoot ($briefValue -replace '/', '\') }
+        $brief = Get-LoopBriefModel -Path $briefPath
+        if (-not $brief.exists) {
+            $checks.Add((New-LoopCheck -Id 'brief' -Ok $false -Detail ("brief not found: $briefPath") -Fix 're-run closeout step brief'))
+        } elseif (-not $pinned) {
+            $checks.Add((New-LoopCheck -Id 'brief' -Ok $false -Detail 'no pinned_sha to compare against verified-against' -Fix 're-run closeout step brief'))
+        } elseif (Test-LoopShaMatch -Left $brief.verified_against -Right $pinned) {
+            $checks.Add((New-LoopCheck -Id 'brief' -Ok $true -Detail ('verified-against ' + $brief.verified_against)))
+        } else {
+            $shown = if ($brief.verified_against) { $brief.verified_against } else { '(blank)' }
+            $checks.Add((New-LoopCheck -Id 'brief' -Ok $false -Detail ("verified-against $shown is not pinned $shortPinned") -Fix 're-run closeout step brief'))
+        }
+    }
+
+    # handoff
+    $handoff = if ($HandoffPath) { $HandoffPath } else { Join-Path (Join-Path $root 'docs') 'HANDOFF.md' }
+    if (-not [System.IO.Path]::IsPathRooted($handoff)) { $handoff = Join-Path $root $handoff }
+    $handoff = [System.IO.Path]::GetFullPath($handoff)
+    $header = Get-LoopHandoffHeader -Path $handoff
+    if ($null -eq $header) {
+        $checks.Add((New-LoopCheck -Id 'handoff' -Ok $true -Detail 'no generated handoff header; not applicable'))
+    } elseif (-not $isGit -or -not $head) {
+        $checks.Add((New-LoopCheck -Id 'handoff' -Ok $false -Detail 'handoff header present but HEAD is unreadable' -Fix 'scripts/ship-check.ps1 -WriteHandoff'))
+    } else {
+        $recorded = if ($header.Contains('head')) { [string]$header['head'] } else { '' }
+        $relativeHandoff = ''
+        if ($handoff.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            $relativeHandoff = ($handoff.Substring($root.Length).TrimStart('\', '/') -replace '\\', '/')
+        }
+        if (Test-LoopShaMatch -Left $recorded -Right $head) {
+            $checks.Add((New-LoopCheck -Id 'handoff' -Ok $true -Detail ('header head matches HEAD ' + $head.Substring(0, 7))))
+        } else {
+            # Committing the regenerated header necessarily moves HEAD by one commit
+            # that touches only the handoff file; that commit is not drift.
+            $parent = Invoke-LoopGit -Root $root -Arguments @('rev-parse', '--verify', '--quiet', 'HEAD~1')
+            $onlyHandoff = $false
+            if ($parent.ExitCode -eq 0 -and (Test-LoopShaMatch -Left $recorded -Right $parent.Text)) {
+                $touched = Invoke-LoopGit -Root $root -Arguments @('diff', '--name-only', 'HEAD~1', 'HEAD')
+                $paths = @($touched.Text -split "`n" | Where-Object { $_ })
+                $onlyHandoff = ($paths.Count -eq 1 -and $paths[0] -eq $relativeHandoff)
+            }
+            if ($onlyHandoff) {
+                $checks.Add((New-LoopCheck -Id 'handoff' -Ok $true -Detail 'header names HEAD~1; HEAD is the handoff commit itself'))
+            } else {
+                $shownRecorded = if ($recorded) { $recorded.Substring(0, [Math]::Min(7, $recorded.Length)) } else { '(blank)' }
+                $checks.Add((New-LoopCheck -Id 'handoff' -Ok $false -Detail ("header head $shownRecorded is not HEAD $($head.Substring(0, 7))") -Fix 'scripts/ship-check.ps1 -WriteHandoff'))
+            }
+        }
+    }
+
+    $allOk = $true
+    foreach ($check in $checks) { if ($check.status -ne 'OK') { $allOk = $false } }
+    return [pscustomobject]@{
+        ok = $allOk
+        project = $root
+        pinned_sha = $pinned
+        base_sha = $base
+        note = $pinnedNote
+        checks = $checks.ToArray()
+    }
+}
+
+function Invoke-LoopBriefCheck {
+    <#
+    The brief and index truth gate. Every claim is one record with a kind, the
+    path or value claimed, its source, and whether it resolved. The caller decides
+    whether a dangling claim is advisory (recon) or blocking (closeout).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Project,
+        [AllowEmptyString()][string]$Wiki = '',
+        [AllowEmptyString()][string]$Brief = '',
+        [AllowEmptyString()][string]$ProofCmd = ''
+    )
+
+    $root = Get-LoopProjectRoot -Project $Project
+    $state = Read-LoopStateFields -Path (Join-Path (Join-Path $root '.loop') 'STATE.md')
+    $isGit = Test-LoopGitRepository -Root $root
+    $wikiValue = if ($Wiki) { $Wiki } else { Get-LoopStateValue -Fields $state -Key 'wiki' }
+    $wikiRoot = Resolve-LoopWikiRoot -Root $root -Wiki $wikiValue
+    $briefValue = if ($Brief) { $Brief } else { Get-LoopStateValue -Fields $state -Key 'brief' }
+    if (-not $briefValue) { $briefValue = 'wiki/references/codebase-brief.md' }
+    $briefPath = if ([System.IO.Path]::IsPathRooted($briefValue)) { $briefValue } else { Join-Path $wikiRoot ($briefValue -replace '/', '\') }
+    $briefPath = [System.IO.Path]::GetFullPath($briefPath)
+    $proof = if ($ProofCmd) { $ProofCmd } else { Get-LoopStateValue -Fields $state -Key 'proof_cmd' }
+
+    $claims = New-Object System.Collections.Generic.List[object]
+    $addClaim = {
+        param([string]$Kind, [string]$Path, [bool]$Ok, [string]$Detail, [string]$Source)
+        $claims.Add([pscustomobject]@{ kind = $Kind; path = $Path; ok = $Ok; detail = $Detail; source = $Source })
+    }
+
+    $briefModel = Get-LoopBriefModel -Path $briefPath
+    $briefRelative = $briefValue
+    if ($briefModel.exists) {
+        $briefDirectory = Split-Path -Parent $briefPath
+        foreach ($path in $briefModel.hot_files) {
+            $ok = Test-LoopPathAtHead -Root $root -RelativePath $path -IsGit $isGit
+            & $addClaim 'hot-file' $path $ok $(if ($ok) { 'exists at HEAD' } else { 'not at HEAD' }) "$briefRelative#Hot files"
+        }
+        foreach ($path in $briefModel.covers) {
+            $ok = Test-LoopPathAtHead -Root $root -RelativePath $path -IsGit $isGit
+            & $addClaim 'covers' $path $ok $(if ($ok) { 'exists at HEAD' } else { 'not at HEAD' }) "$briefRelative#covers"
+        }
+        foreach ($path in $briefModel.pointers) {
+            # A pointer may name project code, a wiki article, or a path relative to the brief.
+            $ok = Test-LoopPathAtHead -Root $root -RelativePath $path -IsGit $isGit
+            if (-not $ok) {
+                foreach ($base in @($wikiRoot, (Join-Path $wikiRoot 'wiki'), $briefDirectory, $root)) {
+                    if (Test-Path -LiteralPath (Join-Path $base ($path -replace '/', '\'))) { $ok = $true; break }
+                }
+            }
+            & $addClaim 'pointer' $path $ok $(if ($ok) { 'resolves' } else { 'not at HEAD, in the wiki, or beside the brief' }) "$briefRelative#Pointers"
+        }
+        if (-not $briefModel.verified_against) {
+            & $addClaim 'verified-against' '(blank)' $false 'brief carries no verified-against SHA' $briefRelative
+        } elseif (-not $isGit) {
+            & $addClaim 'verified-against' $briefModel.verified_against $false 'project is not a Git repository' $briefRelative
+        } else {
+            $reachable = Invoke-LoopGit -Root $root -Arguments @('cat-file', '-e', ($briefModel.verified_against + '^{commit}'))
+            $ok = ($reachable.ExitCode -eq 0)
+            & $addClaim 'verified-against' $briefModel.verified_against $ok $(if ($ok) { 'reachable commit' } else { 'not a reachable commit in the project' }) $briefRelative
+        }
+    } else {
+        & $addClaim 'brief' $briefRelative $false "brief not found at $briefPath" 'STATE.md brief'
+    }
+
+    $indexPath = Join-Path (Join-Path $wikiRoot 'wiki') '_index.md'
+    if ([System.IO.File]::Exists($indexPath)) {
+        $indexDirectory = Split-Path -Parent $indexPath
+        $indexText = [System.IO.File]::ReadAllText($indexPath).TrimStart([char]0xFEFF)
+        $seen = New-Object System.Collections.Generic.List[string]
+        foreach ($match in [regex]::Matches($indexText, '\[[^\]]*\]\(([^)\s]+)\)')) {
+            $target = $match.Groups[1].Value.Trim()
+            if ($target -match '^[a-z][a-z0-9+.-]*://' -or $target.StartsWith('#') -or $target.StartsWith('mailto:')) { continue }
+            $target = $target -replace '#.*$', ''
+            $target = $target.Trim('<', '>')
+            if (-not $target -or $seen.Contains($target)) { continue }
+            $seen.Add($target)
+            $resolved = if ([System.IO.Path]::IsPathRooted($target)) { $target } else { Join-Path $indexDirectory ($target -replace '/', '\') }
+            $ok = Test-Path -LiteralPath $resolved
+            & $addClaim 'index-link' $target $ok $(if ($ok) { 'resolves' } else { 'dangling link' }) 'wiki/_index.md'
+        }
+    } else {
+        & $addClaim 'index' 'wiki/_index.md' $false "index not found under $wikiRoot" 'STATE.md wiki'
+    }
+
+    if ($proof) {
+        $executable = Get-LoopProofExecutable -Root $root -ProofCmd $proof
+        & $addClaim 'proof-cmd' $executable.Token $executable.Ok $(if ($executable.Ok) { 'resolves to ' + $executable.Resolved } else { 'executable does not resolve' }) 'STATE.md proof_cmd'
+    } else {
+        & $addClaim 'proof-cmd' '(blank)' $false 'no proof_cmd in STATE.md' 'STATE.md proof_cmd'
+    }
+
+    # supersedes: Loop C adds the field; a target that does not exist is reported now.
+    $notesRoot = Join-Path (Join-Path $wikiRoot 'raw') 'notes'
+    if ([System.IO.Directory]::Exists($notesRoot)) {
+        $notes = @(Get-ChildItem -LiteralPath $notesRoot -Filter '*.md' -File -ErrorAction SilentlyContinue)
+        $ids = New-Object System.Collections.Generic.List[string]
+        foreach ($note in $notes) {
+            $ids.Add($note.Name)
+            $ids.Add([System.IO.Path]::GetFileNameWithoutExtension($note.Name))
+            $noteText = [System.IO.File]::ReadAllText($note.FullName)
+            foreach ($idMatch in [regex]::Matches($noteText, '(?m)^(?:id|loop):\s*(\S+)\s*$')) { $ids.Add($idMatch.Groups[1].Value) }
+        }
+        foreach ($note in $notes) {
+            $noteText = [System.IO.File]::ReadAllText($note.FullName)
+            foreach ($supersedes in [regex]::Matches($noteText, '(?m)^supersedes:\s*(\S+)\s*$')) {
+                $target = $supersedes.Groups[1].Value.Trim('"', "'")
+                $ok = $ids.Contains($target)
+                & $addClaim 'supersedes' $target $ok $(if ($ok) { 'target note exists' } else { 'target note does not exist' }) ('raw/notes/' + $note.Name)
+            }
+        }
+    }
+    $wikiArticles = Join-Path $wikiRoot 'wiki'
+    if ([System.IO.Directory]::Exists($wikiArticles)) {
+        foreach ($article in @(Get-ChildItem -LiteralPath $wikiArticles -Filter '*.md' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)decision' })) {
+            $articleText = [System.IO.File]::ReadAllText($article.FullName)
+            foreach ($supersedes in [regex]::Matches($articleText, '(?im)^.*\bSupersedes:\s*([A-Za-z][A-Za-z0-9._-]*)\b.*$')) {
+                $target = $supersedes.Groups[1].Value
+                $others = $articleText.Replace($supersedes.Value, '')
+                $ok = [regex]::IsMatch($others, ('(?<![A-Za-z0-9])' + [regex]::Escape($target) + '(?![A-Za-z0-9])'))
+                & $addClaim 'supersedes' $target $ok $(if ($ok) { 'target decision exists' } else { 'target decision does not exist' }) ('wiki/' + $article.Name)
+            }
+        }
+    }
+
+    $dangling = @($claims.ToArray() | Where-Object { -not $_.ok })
+    return [pscustomobject]@{
+        ok = ($dangling.Count -eq 0)
+        project = $root
+        wiki = $wikiRoot
+        brief = $briefPath
+        claims = $claims.ToArray()
+        dangling = $dangling
+    }
+}
+
+function Format-LoopBriefClaims {
+    param([object[]]$Claims, [AllowEmptyString()][string]$Prefix = '')
+    $lines = foreach ($claim in $Claims) {
+        $label = if ($claim.ok) { 'OK   ' } else { 'TODO ' }
+        if ($Prefix) { $label = $Prefix }
+        $label + $claim.kind + ' ' + $claim.path + ': ' + $claim.detail + ' (' + $claim.source + ')'
+    }
+    return (@($lines) -join "`n")
+}
+
+function Update-LoopAssumptionsForBriefCheck {
+    <#
+    Recon-mode side effect: the `[brief]` tag on any assumption that cites a
+    dangling path is downgraded to `[inferred]`; an unreachable verified-against
+    or missing brief downgrades every `[brief]` tag, because nothing in the brief
+    is anchored. One `unverified:` line per dangling claim is appended, without
+    duplicates, so the script is idempotent.
+    #>
+    param([string]$Path, [object[]]$Dangling)
+
+    if (-not [System.IO.File]::Exists($Path)) { return @{ downgraded = 0; appended = 0 } }
+    $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+    $newline = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($text -split "`r?`n")) { $lines.Add($line) }
+    while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
+
+    $anchorLost = (@($Dangling | Where-Object { $_.kind -in @('verified-against', 'brief') }).Count -gt 0)
+    $paths = @($Dangling | Where-Object { $_.kind -notin @('verified-against', 'brief', 'proof-cmd') } | ForEach-Object { $_.path })
+    $downgraded = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -notmatch '\[brief\]') { continue }
+        $hit = $anchorLost
+        if (-not $hit) {
+            foreach ($claimPath in $paths) { if ($line.IndexOf($claimPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break } }
+        }
+        if ($hit) { $lines[$i] = $line -replace '\[brief\]', '[inferred]'; $downgraded++ }
+    }
+
+    $appended = 0
+    foreach ($claim in $Dangling) {
+        $entry = 'unverified: ' + $claim.kind + ' ' + $claim.path + ': ' + $claim.detail + ' (' + $claim.source + ')'
+        if ($lines.Contains($entry)) { continue }
+        $lines.Add($entry)
+        $appended++
+    }
+    if ($downgraded -gt 0 -or $appended -gt 0) {
+        Write-Utf8NoBomAtomic -Path $Path -Content (($lines -join $newline) + $newline)
+    }
+    return @{ downgraded = $downgraded; appended = $appended }
+}

@@ -6,6 +6,9 @@ All notable changes to this custom fork are documented here.
 
 ### Added
 
+- xloop: `loop-ship-check.ps1`, a clerical ship gate that reports `committed`, `pushed`, `docs`, `wiki`, `brief`, and `handoff` as `OK` or `TODO` with a one-line fix and exits `0` only when all are `OK` (`-Json` for machines). `loop-step.ps1 -Transition closeout-next -ToCloseoutStep complete` refuses while it fails and records `ship_check: <ISO-8601>` in `STATE.md`; `scripts/ship-check.ps1` runs the same checks against this repository for the release checklist. A `pushed` check with no upstream passes with a note; a `docs` check accepts a `Docs: n/a — <reason>` commit trailer.
+- xloop: `loop-brief-check.ps1`, a clerical brief and index truth gate: Hot files, Pointers, and `covers` paths must exist at HEAD, every relative `wiki/_index.md` link must resolve, `verified-against` must be reachable, the `proof_cmd` executable must resolve, and a lesson or decision `supersedes:` target must exist. Recon runs it advisory (`-Mode recon` appends `unverified:` lines to `ASSUMPTIONS.md` and downgrades affected `[brief]` tags to `[inferred]`); closeout runs it blocking (`-Mode closeout` exits `1` naming each dangling claim).
+- xloop: `docs/HANDOFF.md` now starts with a generated header (head, branch, clean, ahead/behind per remote, Peer Sessions plugin version from its four manifests, date) that `scripts/ship-check.ps1 -WriteHandoff` rewrites; everything below the `<!-- handwritten -->` marker is untouched, and the ship gate's `handoff` check compares the header to HEAD.
 - XLoop wrappers now continue a quota-refused packet once through the alternate provider, symmetrically for Claude and Codex, while preserving packet guards, output validation, role separation, and bounded failure semantics. Dual exhaustion records `quota-exhausted`; generic rate-limit, auth, network, overload, and timeout failures remain ordinary tool failures.
 
 ### Fixed
