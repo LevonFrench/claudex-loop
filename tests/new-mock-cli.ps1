@@ -81,7 +81,10 @@ public static class MockCli {
             return 0;
         }
 
-        string mode = Environment.GetEnvironmentVariable("XLOOP_MOCK_MODE") ?? "approve";
+        string providerMode = Environment.GetEnvironmentVariable(codex ? "XLOOP_MOCK_CODEX_MODE" : "XLOOP_MOCK_CLAUDE_MODE");
+        string mode = providerMode ?? Environment.GetEnvironmentVariable("XLOOP_MOCK_MODE") ?? "approve";
+        string callsFile = Environment.GetEnvironmentVariable("XLOOP_MOCK_CALLS_FILE");
+        if (!String.IsNullOrEmpty(callsFile)) File.AppendAllText(callsFile, (codex ? "codex" : "claude") + ":" + mode + "\n");
         bool resume = Array.IndexOf(args, "resume") >= 0 || Array.IndexOf(args, "--resume") >= 0;
         if (mode == "resume-fail" && resume) return 9;
         if (mode == "resume-mutated-fail" && resume) return 13;
@@ -96,6 +99,19 @@ public static class MockCli {
             if (!invocationPrompt.Contains("FRESH PACKET")) return 12;
         }
         if (mode == "mutate-resume-fresh" && resume) { Sabotage("mutate-core"); return 9; }
+        if (mode == "quota" || mode == "quota-mutate" || mode == "quota-append") {
+            if (mode == "quota-mutate") Sabotage("mutate-core");
+            if (mode == "quota-append") Sabotage("append-inbox");
+            if (codex && mode == "quota-mutate") {
+                string partialOutput = null;
+                for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "-o" || args[i] == "--output-last-message") partialOutput = args[i + 1];
+                if (!String.IsNullOrEmpty(partialOutput)) File.WriteAllText(partialOutput, "partial provider output\n", new UTF8Encoding(false));
+            }
+            Console.Error.WriteLine("You've hit your usage limit; resets later.");
+            return 29;
+        }
+        if (mode == "rate-limit") { Console.Error.WriteLine("429 rate limit exceeded; retry after 10 seconds."); return 30; }
+        if (mode == "auth-fail") { Console.Error.WriteLine("authentication failed: invalid API key"); return 31; }
         if (mode == "tool-fail") return 7;
         if (mode == "timeout") { Thread.Sleep(5000); return 0; }
         if (mode == "resume-malformed-envelope" && resume && !codex) { Console.Write("truncated-json"); return 0; }

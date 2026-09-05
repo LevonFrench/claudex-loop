@@ -89,6 +89,62 @@ function Write-BytesAtomic {
     }
 }
 
+function Test-ProviderQuotaFailure {
+    <#
+    Quota failover is deliberately narrower than a generic retry.  A 429, an
+    overloaded provider, a timeout, an authentication error, or a network failure
+    must retain the normal wrapper result.  Only provider messages that explicitly
+    say the account has exhausted a usage allowance, quota, credits, or spend cap
+    may cross the provider boundary.
+    #>
+    param(
+        [ValidateSet('claude', 'codex')][string]$Provider,
+        [AllowEmptyString()][string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $normalized = $Text.ToLowerInvariant()
+    $patterns = @(
+        '\b(insufficient[_ -]?quota|quota (?:has been )?(?:exceeded|exhausted)|exceeded (?:your |the )?quota)\b',
+        '\b(?:you(?:''ve| have)? |account |organization |workspace )?(?:hit|reached|exceeded|exhausted) (?:your |the )?(?:daily |weekly |monthly )?usage limit\b',
+        '\b(?:usage|token) (?:allowance|quota) (?:is |has been )?(?:exhausted|exceeded|used up)\b',
+        '\b(?:no|zero|0) (?:weighted )?tokens? (?:left|remaining)\b',
+        '\b(?:credit balance|credits?) (?:is |are |has been )?(?:too low|depleted|exhausted|used up)\b',
+        '\b(?:not enough|insufficient) credits?\b',
+        '\b(?:billing|monthly|spend) (?:hard )?limit (?:has been )?(?:reached|exceeded)\b',
+        '\bout of (?:extra )?usage\b'
+    )
+    foreach ($pattern in $patterns) {
+        if ($normalized -match $pattern) { return $true }
+    }
+    return $false
+}
+
+function Restore-GuardAppendOnlyBaseline {
+    <#
+    A quota-refused attempt did not complete its packet.  Roll back even valid
+    append-only growth before the alternate provider receives that packet, or a
+    half-finished closeout can be appended twice.  Protected-file mutations are
+    restored by Update-GuardState and remain reportable violations.
+    #>
+    param($Guard)
+
+    if ($null -eq $Guard) { return }
+    foreach ($path in @($Guard.AppendOnly.Keys)) {
+        Write-BytesAtomic -Path $path -Bytes $Guard.AppendOnly[$path]
+    }
+}
+
+function Write-LoopPathListFile {
+    param($Guard, [string]$LoopRoot, [string]$Label, [string[]]$Path)
+
+    if (@($Path).Count -eq 0) { return '' }
+    $listPath = Join-Path $LoopRoot ('tmp\quota-failover-' + $Label + '-' + [guid]::NewGuid().ToString('N') + '.txt')
+    Write-Utf8NoBomAtomic -Path $listPath -Content ((@($Path) -join "`n") + "`n")
+    Add-GuardInternalPath -Guard $Guard -Path @($listPath)
+    return $listPath
+}
+
 function Resolve-LoopFile {
     param([string]$Value, [string]$Root, [string]$LoopRoot, [bool]$MustExist)
 
@@ -498,7 +554,16 @@ function New-PacketGuard {
     $internal = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
     if ($output) {
         [void]$internal.Add($output)
-        foreach ($suffix in @('.meta.json', '.resume.response.json', '.fresh.response.json', '.resume.events.jsonl', '.fresh.events.jsonl', '.resume.stderr.log', '.fresh.stderr.log')) {
+        foreach ($suffix in @(
+            '.meta.json',
+            '.resume.response.json', '.fresh.response.json',
+            '.resume.events.jsonl', '.fresh.events.jsonl',
+            '.resume.stderr.log', '.fresh.stderr.log',
+            '.resume.claude.response.json', '.fresh.claude.response.json',
+            '.resume.claude.stderr.log', '.fresh.claude.stderr.log',
+            '.resume.codex.events.jsonl', '.fresh.codex.events.jsonl',
+            '.resume.codex.stderr.log', '.fresh.codex.stderr.log'
+        )) {
             [void]$internal.Add($output + $suffix)
         }
     }

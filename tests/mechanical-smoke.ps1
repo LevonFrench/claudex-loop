@@ -286,6 +286,101 @@ try {
         $hubRead = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\hub-read.md', '-AddDir', $hubScope, '-TimeoutSec', '5')
         Assert-True -Condition ($hubRead.ExitCode -eq 0) -Message "Claude wrapper rejected a validated external wiki scope: $($hubRead.Output)"
 
+        # A provider usage/quota exhaustion crosses once to the other provider with
+        # the same fresh packet and output path. Provider-local handles and model
+        # overrides never cross that boundary.
+        $callsPath = Join-Path $tempRoot 'quota-calls.log'
+        $env:XLOOP_MOCK_CALLS_FILE = $callsPath
+        try {
+            $env:XLOOP_MOCK_MODE = 'approve'
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'quota'
+            $env:XLOOP_MOCK_CODEX_MODE = 'bom'
+            $claudeQuotaOut = '.loop\rounds\claude-quota-findings.md'
+            $claudeQuota = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-FreshPromptFile', '.loop\tmp\fresh packet.txt', '-OutFile', $claudeQuotaOut, '-ResumeSession', 'provider-local-session', '-TimeoutSec', '5')
+            Assert-True -Condition ($claudeQuota.ExitCode -eq 0) -Message "Claude quota did not continue through Codex: $($claudeQuota.Output)"
+            $claudeQuotaMeta = [IO.File]::ReadAllText((Join-Path $project ($claudeQuotaOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ([bool]$claudeQuotaMeta.quota_failover -and $claudeQuotaMeta.requested_tool -eq 'claude' -and $claudeQuotaMeta.tool -eq 'codex') -Message 'Claude-to-Codex failover metadata is incomplete.'
+            Assert-True -Condition (($claudeQuotaMeta.provider_chain -join ',') -eq 'claude,codex') -Message 'Claude-to-Codex provider chain is wrong.'
+            Assert-True -Condition ($claudeQuotaMeta.primary_attempts.Count -eq 1 -and $claudeQuotaMeta.primary_attempts[0].failure_class -eq 'quota') -Message 'Claude quota was not classified on the primary attempt.'
+            Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $project $claudeQuotaOut)).TrimStart([char]0xFEFF) -match 'VERDICT: APPROVE') -Message 'Claude-to-Codex failover did not keep the canonical output semantics.'
+            $calls = @([IO.File]::ReadAllLines($callsPath))
+            Assert-True -Condition (($calls -join ',') -eq 'claude:quota,codex:bom') -Message "Claude quota invoked an unexpected provider sequence: $($calls -join ',')"
+
+            [IO.File]::WriteAllText($callsPath, '')
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'bom'
+            $env:XLOOP_MOCK_CODEX_MODE = 'quota'
+            $codexQuotaOut = '.loop\rounds\codex-quota-findings.md'
+            $codexQuota = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-FreshPromptFile', '.loop\tmp\fresh packet.txt', '-OutFile', $codexQuotaOut, '-ResumeThread', 'provider-local-thread', '-TimeoutSec', '5')
+            Assert-True -Condition ($codexQuota.ExitCode -eq 0) -Message "Codex quota did not continue through Claude: $($codexQuota.Output)"
+            $codexQuotaMeta = [IO.File]::ReadAllText((Join-Path $project ($codexQuotaOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ([bool]$codexQuotaMeta.quota_failover -and $codexQuotaMeta.requested_tool -eq 'codex' -and $codexQuotaMeta.tool -eq 'claude') -Message 'Codex-to-Claude failover metadata is incomplete.'
+            Assert-True -Condition (($codexQuotaMeta.provider_chain -join ',') -eq 'codex,claude') -Message 'Codex-to-Claude provider chain is wrong.'
+            $calls = @([IO.File]::ReadAllLines($callsPath))
+            Assert-True -Condition (($calls -join ',') -eq 'codex:quota,claude:bom') -Message "Codex quota invoked an unexpected provider sequence: $($calls -join ',')"
+
+            # Transient rate limiting and authentication failures are not quota.
+            foreach ($nonQuota in @(
+                [pscustomobject]@{ Tool = 'claude'; Mode = 'rate-limit'; Wrapper = $claudeWrapper },
+                [pscustomobject]@{ Tool = 'codex'; Mode = 'auth-fail'; Wrapper = $codexWrapper }
+            )) {
+                [IO.File]::WriteAllText($callsPath, '')
+                $env:XLOOP_MOCK_CLAUDE_MODE = if ($nonQuota.Tool -eq 'claude') { $nonQuota.Mode } else { 'bom' }
+                $env:XLOOP_MOCK_CODEX_MODE = if ($nonQuota.Tool -eq 'codex') { $nonQuota.Mode } else { 'bom' }
+                $out = ".loop\rounds\non-quota-$($nonQuota.Tool).md"
+                $run = Invoke-ChildPowerShell -Script $nonQuota.Wrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $out, '-TimeoutSec', '5')
+                Assert-True -Condition ($run.ExitCode -eq 1) -Message "$($nonQuota.Tool) non-quota failure unexpectedly succeeded: $($run.Output)"
+                $meta = [IO.File]::ReadAllText((Join-Path $project ($out + '.meta.json'))) | ConvertFrom-Json
+                Assert-True -Condition (-not [bool]$meta.quota_failover -and $meta.failure_class -eq 'tool-failure') -Message "$($nonQuota.Tool) non-quota failure was misclassified."
+                $calls = @([IO.File]::ReadAllLines($callsPath))
+                Assert-True -Condition ($calls.Count -eq 1 -and $calls[0] -eq ($nonQuota.Tool + ':' + $nonQuota.Mode)) -Message "$($nonQuota.Tool) non-quota failure invoked the alternate provider."
+            }
+
+            # The alternate wrapper has failover disabled, so dual exhaustion stops
+            # after exactly two providers rather than ping-ponging forever.
+            [IO.File]::WriteAllText($callsPath, '')
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'quota'
+            $env:XLOOP_MOCK_CODEX_MODE = 'quota'
+            $dualOut = '.loop\rounds\dual-quota.md'
+            $dualQuota = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $dualOut, '-TimeoutSec', '5')
+            Assert-True -Condition ($dualQuota.ExitCode -eq 1) -Message "Dual quota returned $($dualQuota.ExitCode), expected 1: $($dualQuota.Output)"
+            $dualMeta = [IO.File]::ReadAllText((Join-Path $project ($dualOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ($dualMeta.failure_class -eq 'quota-exhausted' -and [bool]$dualMeta.quota_failover) -Message 'Dual quota was not reported as bounded exhaustion.'
+            Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $project $dualOut))) -Message 'Dual quota left a partial canonical output.'
+            $calls = @([IO.File]::ReadAllLines($callsPath))
+            Assert-True -Condition (($calls -join ',') -eq 'claude:quota,codex:quota') -Message "Dual quota was not bounded to two providers: $($calls -join ',')"
+
+            # A failed primary attempt cannot leak output, core mutations, strays,
+            # or append-only growth into the alternate provider's packet.
+            [IO.File]::WriteAllText($callsPath, '')
+            $stateBeforeQuota = [IO.File]::ReadAllBytes($statePath)
+            $env:XLOOP_MOCK_CODEX_MODE = 'quota-mutate'
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'bom'
+            $mutatingOut = '.loop\rounds\quota-mutation.md'
+            $mutatingQuota = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $mutatingOut, '-TimeoutSec', '5')
+            Assert-True -Condition ($mutatingQuota.ExitCode -eq 2) -Message "Quota mutation was not restored/reported: $($mutatingQuota.Output)"
+            $mutatingMeta = [IO.File]::ReadAllText((Join-Path $project ($mutatingOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ($mutatingMeta.nudge_class -eq 'mutation' -and [bool]$mutatingMeta.quota_failover) -Message 'Primary quota mutation was lost from combined metadata.'
+            Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $project $mutatingOut)).TrimStart([char]0xFEFF) -match 'VERDICT: APPROVE') -Message 'Partial primary output survived instead of alternate output.'
+            Assert-True -Condition (@(Compare-Object $stateBeforeQuota ([IO.File]::ReadAllBytes($statePath)) -SyncWindow 0).Count -eq 0) -Message 'Quota attempt did not restore STATE.md byte-for-byte.'
+            Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $project '.loop\rogue-note.md'))) -Message 'Quota attempt left an unexpected durable addition.'
+            Remove-Item -LiteralPath (Join-Path $project '.loop\tmp\quarantine') -Recurse -Force -ErrorAction SilentlyContinue
+
+            $inboxPathForQuota = Join-Path $project '.loop\wiki-inbox.md'
+            $quotaInboxSeed = "- quota seed`r`n"
+            [IO.File]::WriteAllText($inboxPathForQuota, $quotaInboxSeed, (New-Object Text.UTF8Encoding($false)))
+            $env:XLOOP_MOCK_CODEX_MODE = 'quota-append'
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'append-inbox'
+            $appendQuota = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\CLOSEOUT-REPORT.md', '-AppendOnlyFile', '.loop\wiki-inbox.md', '-TimeoutSec', '5')
+            Assert-True -Condition ($appendQuota.ExitCode -eq 0) -Message "Quota append rollback/failover failed: $($appendQuota.Output)"
+            $quotaInboxAfter = [IO.File]::ReadAllText($inboxPathForQuota)
+            Assert-True -Condition (($quotaInboxAfter -split 'durable note from closeout').Count -eq 2) -Message 'Failed primary append survived and was duplicated by failover.'
+            Assert-True -Condition ($quotaInboxAfter.StartsWith($quotaInboxSeed)) -Message 'Quota append rollback lost the original append-only prefix.'
+        } finally {
+            Remove-Item Env:XLOOP_MOCK_CALLS_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_CLAUDE_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_CODEX_MODE -ErrorAction SilentlyContinue
+        }
+
         foreach ($tool in @('codex', 'claude')) {
             $env:XLOOP_MOCK_MODE = 'resume-requires-fresh'
             $wrapper = if ($tool -eq 'codex') { $codexWrapper } else { $claudeWrapper }

@@ -4,6 +4,10 @@ All notable changes to this custom fork are documented here.
 
 ## Unreleased
 
+### Added
+
+- XLoop wrappers now continue a quota-refused packet once through the alternate provider, symmetrically for Claude and Codex, while preserving packet guards, output validation, role separation, and bounded failure semantics. Dual exhaustion records `quota-exhausted`; generic rate-limit, auth, network, overload, and timeout failures remain ordinary tool failures.
+
 ### Fixed
 
 - xloop: Claude read-only summons ran in plan mode with no write tools while the packets told the agent to "write the output path"; Claude answered with prose about being unable to write, burned the format nudge, and forced a human ruling on findings it had already produced. Read-only summons now use `dontAsk`, and every Claude summon carries a fixed system prompt stating that the final message is stored verbatim as the artifact and that nobody is present to ask. Verified with a live read-only review summon that returned a well-formed `VERDICT: REVISE` on the first attempt.

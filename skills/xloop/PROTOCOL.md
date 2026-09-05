@@ -223,6 +223,8 @@ Build is checkpointed after every durable action. `build_step: summon` selects t
 
 The wrapper attempts resume. For delta-only resumed reviews, the driver renders both the delta prompt and a self-sufficient full-plan prompt, passing the latter as `-FreshPromptFile`. Read-only resume failures fall back once to that corresponding fresh packet and record the round in `resume_fallback`. In write mode, automatic fallback is allowed only for a recognized invalid/expired handle or sandbox-switch refusal that occurs before the agent turn; any other failure returns `1` so the driver checks HEAD, worktree status, and report state before deciding whether a fresh builder is safe. Build/fix packets may reuse the same self-sufficient prompt. A summoned agent writes only its output path and does not update state.
 
+An explicit provider usage/quota exhaustion is a provider-boundary failure, not a review or build checkpoint. The wrapper restores protected inputs, rolls back append-only growth and partial canonical output from the failed attempt, then runs the same self-sufficient fresh packet once through the other provider. It never forwards a provider session/thread handle or model override, never changes roles or `STATE.md`, and disables further failover in the alternate wrapper. Generic rate limiting, overload, network, authentication, malformed output, and timeout errors are not quota. Combined metadata records `quota_failover`, `provider_chain`, `requested_tool`, `primary_attempts`, and `failure_class`; if both providers report quota, the bounded result is exit `1` with `failure_class: quota-exhausted`.
+
 ## 5. Query-lite wiki protocol
 
 Resolve the wiki using file reads only:

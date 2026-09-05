@@ -2,6 +2,8 @@
 
 A Windows-native, wiki-first Claude–Codex planning and build loop. The two models share only durable files under `<project>/.loop/`: one authors the plan, the other attacks it and then builds it, and the original author inspects pinned commits. A lost session can resume from disk without a human recap.
 
+If the selected provider explicitly exhausts its account usage/quota, its wrapper automatically continues the same self-contained packet once through the other provider. Roles and output paths stay unchanged, failed-attempt packet changes are cleaned, and ordinary rate limiting, auth, network, overload, and timeout failures are not misclassified as quota. Dual exhaustion stops after the one alternate attempt and records `quota-exhausted`.
+
 This repository is a tuned fork of [chaseai-yt/claudex-loop](https://github.com/chaseai-yt/claudex-loop). The original skill sources are preserved under [`upstream/`](upstream/) for attribution and comparison, but are not installed.
 
 ## What changed

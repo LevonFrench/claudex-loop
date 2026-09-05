@@ -23,6 +23,11 @@ param(
 
     [string]$CodexPath = '',
 
+    [string]$FallbackClaudePath = '',
+
+    [Alias('WikiRoot')]
+    [string]$AddDir = '',
+
     [string[]]$EvidenceFile = @(),
 
     [string]$EvidenceListFile = '',
@@ -38,7 +43,9 @@ param(
 
     [switch]$Visible,
 
-    [switch]$Headless
+    [switch]$Headless,
+
+    [switch]$DisableQuotaFailover
 )
 
 Set-StrictMode -Version 2.0
@@ -82,13 +89,21 @@ try {
     $freshPromptPath = if ($FreshPromptFile) { Resolve-LoopFile -Value $FreshPromptFile -Root $root -LoopRoot $loopRoot -MustExist $true } else { $promptPath }
     $outputPath = Resolve-LoopFile -Value $OutFile -Root $root -LoopRoot $loopRoot -MustExist $false
     $metadataPath = $outputPath + '.meta.json'
+    $additionalDirectory = ''
+    if ($AddDir) {
+        $additionalDirectory = (Resolve-Path -LiteralPath $AddDir).Path
+        if (-not [System.IO.Directory]::Exists($additionalDirectory)) { throw "Additional directory does not exist: $additionalDirectory" }
+        if (([System.IO.File]::GetAttributes($additionalDirectory) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing reparse-point additional directory: $additionalDirectory"
+        }
+    }
 
     # `powershell -File` cannot bind arrays, so list files carry multi-file packets.
     $evidenceValues = @($EvidenceFile | Where-Object { $_ })
     if ($EvidenceListFile) { $evidenceValues += @(Read-LoopPathList -Path (Resolve-LoopFile -Value $EvidenceListFile -Root $root -LoopRoot $loopRoot -MustExist $true)) }
     $appendOnlyValues = @($AppendOnlyFile | Where-Object { $_ })
     if ($AppendOnlyListFile) { $appendOnlyValues += @(Read-LoopPathList -Path (Resolve-LoopFile -Value $AppendOnlyListFile -Root $root -LoopRoot $loopRoot -MustExist $true)) }
-    $evidencePaths = @($evidenceValues | ForEach-Object { (Resolve-PacketEvidence -Value $_ -Root $root -LoopRoot $loopRoot).Path })
+    $evidencePaths = @($evidenceValues | ForEach-Object { (Resolve-PacketEvidence -Value $_ -Root $root -LoopRoot $loopRoot -AllowedRoot @($additionalDirectory)).Path })
     $appendOnlyPaths = @($appendOnlyValues | ForEach-Object { Resolve-LoopFile -Value $_ -Root $root -LoopRoot $loopRoot -MustExist $false })
 
     $prompt = [System.IO.File]::ReadAllText($promptPath).TrimStart([char]0xFEFF)
@@ -105,6 +120,8 @@ try {
     $selectedResult = $null
     $selectedEvents = ''
     $attemptKind = ''
+    $quotaDetected = $false
+    $quotaDiagnostic = ''
     $writeFlag = if ($Sandbox -eq 'write') { Get-WriteFlag -ProtocolPath (Join-Path $loopRoot 'PROTOCOL.md') } else { '' }
     $readIntentSandbox = if ($Sandbox -eq 'read-only') { Get-LoopCodexSandboxArgument -Intent 'read-only' } else { '' }
 
@@ -123,6 +140,7 @@ try {
             '-c', 'features.apps=false',
             '-c', 'agents.enabled=false'
         )
+        if ($additionalDirectory) { $hardening += @('--add-dir', $additionalDirectory) }
         if ($Model) { $hardening = @('-m', $Model) + $hardening }
         $arguments = if ($kind -eq 'resume') {
             $list = @('exec', 'resume', $ResumeThread)
@@ -138,8 +156,8 @@ try {
         # Restore before anything else reads .loop, so a mutation from this attempt
         # can never reach the fresh fallback packet or survive a later failure.
         [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
-        $eventPath = $outputPath + '.' + $kind + '.events.jsonl'
-        $errorPath = $outputPath + '.' + $kind + '.stderr.log'
+        $eventPath = $outputPath + '.' + $kind + '.codex.events.jsonl'
+        $errorPath = $outputPath + '.' + $kind + '.codex.stderr.log'
         Write-Utf8NoBomAtomic -Path $eventPath -Content $native.StdOut
         Write-Utf8NoBomAtomic -Path $errorPath -Content $native.StdErr
         [void]$attempts.Add([ordered]@{ kind = $kind; exit_code = $native.ExitCode; timed_out = $native.TimedOut; visible = $native.Visible; events = $eventPath; stderr = $errorPath })
@@ -151,6 +169,12 @@ try {
             exit 3
         }
         $resumeDiagnostic = $native.StdOut + "`n" + $native.StdErr
+        if ($native.ExitCode -ne 0 -and (Test-ProviderQuotaFailure -Provider 'codex' -Text $resumeDiagnostic)) {
+            $quotaDetected = $true
+            $quotaDiagnostic = $resumeDiagnostic
+            $attempts[$attempts.Count - 1]['failure_class'] = 'quota'
+            break
+        }
         $invalidResume = ($kind -eq 'resume' -and $resumeDiagnostic -match '(?i)((thread|session).*(invalid|expired|not found|does not exist)|invalid.*(thread|session))')
         $preTurnSandboxFailure = ($kind -eq 'resume' -and $resumeDiagnostic -match '(?i)(sandbox.*(switch|change).*(refus|unsupported|cannot)|(?:refus|unsupported|cannot).*sandbox.*(switch|change))')
         if ($native.ExitCode -eq 0 -and -not $invalidResume) {
@@ -168,7 +192,81 @@ try {
     [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
 
     if ($null -eq $selectedResult) {
-        $metadata = [ordered]@{ tool = 'codex'; exit_code = 1; resumed = $false; resume_fallback = $fallback; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
+        if ($quotaDetected -and -not $DisableQuotaFailover) {
+            Restore-GuardAppendOnlyBaseline -Guard $guard
+            $appends.Clear()
+            if ([System.IO.File]::Exists($outputPath)) { [System.IO.File]::Delete($outputPath) }
+            $evidenceList = Write-LoopPathListFile -Guard $guard -LoopRoot $loopRoot -Label 'codex-to-claude-evidence' -Path $evidencePaths
+            $appendList = Write-LoopPathListFile -Guard $guard -LoopRoot $loopRoot -Label 'codex-to-claude-append' -Path $appendOnlyPaths
+            $fallbackScript = Join-Path $PSScriptRoot 'loop-claude.ps1'
+            $fallbackArguments = @(
+                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fallbackScript,
+                '-Project', $root,
+                '-PromptFile', $freshPromptPath,
+                '-FreshPromptFile', $freshPromptPath,
+                '-OutFile', $outputPath,
+                '-Sandbox', $Sandbox,
+                '-TimeoutSec', [string]$TimeoutSec,
+                '-DisableQuotaFailover'
+            )
+            if ($FallbackClaudePath) { $fallbackArguments += @('-ClaudePath', $FallbackClaudePath) }
+            if ($additionalDirectory) { $fallbackArguments += @('-AddDir', $additionalDirectory) }
+            if ($evidenceList) { $fallbackArguments += @('-EvidenceListFile', $evidenceList) }
+            if ($appendList) { $fallbackArguments += @('-AppendOnlyListFile', $appendList) }
+            if ($Expect) { $fallbackArguments += @('-Expect', $Expect) }
+            if ($Phase) { $fallbackArguments += @('-Phase', $Phase) }
+            if ($Headless) { $fallbackArguments += '-Headless' } elseif ($Visible) { $fallbackArguments += '-Visible' }
+
+            $guard = $null
+            $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+            $fallbackNative = Invoke-NativeProcess -Executable $powershell -Arguments $fallbackArguments -WorkingDirectory $root -TimeoutSeconds ($TimeoutSec + 30) -Visible:$false -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $null
+            foreach ($listPath in @($evidenceList, $appendList)) {
+                if ($listPath -and [System.IO.File]::Exists($listPath)) { [System.IO.File]::Delete($listPath) }
+            }
+
+            $alternate = $null
+            if ([System.IO.File]::Exists($metadataPath)) {
+                try { $alternate = [System.IO.File]::ReadAllText($metadataPath).TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { }
+            }
+            $alternateMutations = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'mutations')) { @($alternate.mutations) } else { @() }
+            $allMutations = @($violations) + $alternateMutations
+            $alternateAppends = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'appends')) { @($alternate.appends) } else { @() }
+            $alternateNudge = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'nudge_class')) { [string]$alternate.nudge_class } else { '' }
+            $wrapperExit = if ($fallbackNative.TimedOut) { 3 } else { $fallbackNative.ExitCode }
+            if ($wrapperExit -eq 0 -and $allMutations.Count -gt 0) { $wrapperExit = 2; $alternateNudge = 'mutation' }
+            $alternateFailure = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'failure_class')) { [string]$alternate.failure_class } else { '' }
+            $failureClass = if ($alternateFailure -eq 'quota') { 'quota-exhausted' } elseif ($wrapperExit -eq 0 -or $wrapperExit -eq 2) { '' } elseif ($fallbackNative.TimedOut) { 'timeout' } else { 'failover-tool-failure' }
+            if ($wrapperExit -ne 0 -and $wrapperExit -ne 2 -and [System.IO.File]::Exists($outputPath)) { [System.IO.File]::Delete($outputPath) }
+            $metadata = [ordered]@{
+                tool = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'tool')) { [string]$alternate.tool } else { 'claude' }
+                requested_tool = 'codex'
+                exit_code = $wrapperExit
+                quota_failover = $true
+                failure_class = $failureClass
+                provider_chain = @('codex', 'claude')
+                resumed = $false
+                resume_fallback = $fallback
+                thread_id = $threadId
+                session_id = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'session_id')) { [string]$alternate.session_id } else { '' }
+                out_file = $outputPath
+                sandbox = $Sandbox
+                nudge_class = $alternateNudge
+                expected_terminator = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'expected_terminator')) { [string]$alternate.expected_terminator } else { $expectedTerminator }
+                terminator = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'terminator')) { [string]$alternate.terminator } else { '' }
+                validation_error = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'validation_error')) { [string]$alternate.validation_error } else { '' }
+                mutations = $allMutations
+                appends = $alternateAppends
+                attempts = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'attempts')) { @($alternate.attempts) } else { @() }
+                primary_attempts = @($attempts)
+            }
+            Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 8)
+            $metadata | ConvertTo-Json -Depth 8 -Compress
+            if ($failureClass -eq 'quota-exhausted') { [Console]::Error.WriteLine('Both Codex and Claude usage quotas are exhausted.') }
+            exit $wrapperExit
+        }
+        if ([System.IO.File]::Exists($outputPath)) { [System.IO.File]::Delete($outputPath) }
+        $failureClass = if ($quotaDetected) { 'quota' } else { 'tool-failure' }
+        $metadata = [ordered]@{ tool = 'codex'; exit_code = 1; failure_class = $failureClass; quota_failover = $false; resumed = $false; resume_fallback = $fallback; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
         Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
         [Console]::Error.WriteLine("Codex failed. See $metadataPath")
         exit 1
