@@ -26,6 +26,10 @@ If `proof_cmd` is unknown, ask for or recommend it here. Always ask for `PROOF-R
 
 Use defaults for unanswered items. First append an `Answer:` or `Default applied:` line to every question in `.loop/QUESTIONS.md`; only then draft the plan. Record confirmed assumptions in `.loop/ASSUMPTIONS.md`; record choices as stable `D` entries in `.loop/PLAN.md`. A pre-settled decision remains closed unless the user explicitly reopens it.
 
+Write the user's answer verbatim, beside the `Recommended:` line it answers. An answer that names a different choice than the recommendation is an override; closeout promotes every override as a `[user-ruling]` lesson (protocol §3.8), so never rewrite the recommendation to match the answer.
+
+When the user corrects something the driver asserted (what a term means, what the code does, what was agreed), settle it by checking a command or file, then record it with `scripts/loop-step.ps1 -Transition record-correction -Correction "<the user's words>" -Ruling user_right|agent_right|unresolved -Evidence "<command or file>"` (protocol §3.6). The transition refuses a ruling without evidence. Do not turn the correction into another question.
+
 Draft the plan using the exact anchored schema in `.loop/PROTOCOL.md` §3.2:
 
 - Goal at most 80 words.

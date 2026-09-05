@@ -44,6 +44,8 @@ Write the changed PLAN atomically, then `rounds/r<N>-response.md` using protocol
 
 Increment the round and update `open`, `settled`, and `verdict`. Stop at five rounds. Round 5 `REVISE` writes all surviving blockers and both positions into one `.loop/QUESTIONS.md` batch and sets `phase: escalated`. Each item uses the §3.6 fields (`Q`, `why load-bearing`, `options`, `default-if-silent`) plus `Recommended:`, the driver's own ruling with a one-sentence reason; the batch ends with one line offering `defaults`, per-ID overrides, `revise`, or `abort`. Display the whole batch once and accept a single reply. Apply `default-if-silent` to anything unanswered, record rulings as settled, and continue; there is no round 6.
 
+Write each escalation answer as an `Answer:` line beside its `Recommended:` line; an answer that overrides the recommendation is promoted at closeout as a `[user-ruling]` lesson. If the user corrects the driver during review (a wrong reading of a finding, a settled ID, or the code), settle it by checking and record it with `scripts/loop-step.ps1 -Transition record-correction -Correction "<words>" -Ruling <ruling> -Evidence "<command or file>"` (protocol §3.6); the record needs evidence or it is refused. Corrections never reopen arbitration by themselves.
+
 ## Approval transition
 
 On validated `APPROVE`, update the review log and state without asking the user to confirm the transition; the build gate in `build.md` is the next decision point, and it asks only about a dirty tree. Confirm `proof_cmd` exists. Set `phase: build`, `build_round: 1`, `build_step: summon`, retain the approved `base_sha`, clear `open`, refresh the lock, and load `build.md`. Report a delta summary and file link; do not paste the plan.

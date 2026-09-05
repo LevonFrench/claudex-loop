@@ -112,6 +112,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File <xloop-skill>\scripts\lo
 ```
 
 Two clerical truth gates sit beside it. `scripts\loop-ship-check.ps1 -Project <project>` reports `committed`, `pushed`, `docs`, `wiki`, `brief`, and `handoff` as `OK` or `TODO` with a one-line fix and exits `0` only when all are `OK`; the closeout `complete` transition refuses until it passes. `scripts\loop-brief-check.ps1 -Project <project> -Mode recon|closeout` checks that the codebase brief's Hot files, Pointers, and `covers` paths exist at HEAD, that every `wiki/_index.md` link resolves, that `verified-against` is reachable, and that the proof command's executable resolves; recon runs it advisory, closeout runs it blocking. For this repository, `.\scripts\ship-check.ps1` runs the ship gate against the checkout and `-WriteHandoff` regenerates the header of `docs/HANDOFF.md`.
+To see which xloop mechanisms have ever run on this machine (wrappers, transitions, nudges, restores, failover, summon modes), run `loop-status.ps1 -Fired`; `scripts\doctor.ps1` prints the same table. The record lives in `~\.xloop\fired.json` and holds names and timestamps only. `loop-status.ps1 -Project <p> -Corrections` lists the user rulings and closing rating closeout promotes as lessons, and `-Lessons` performs recon's bounded lessons grep with superseded notes excluded.
 
 The locked v1 choices are:
 

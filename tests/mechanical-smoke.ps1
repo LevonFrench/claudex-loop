@@ -119,6 +119,13 @@ $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-offline-smoke-' + [guid
 $expectedPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
 Assert-True -Condition ([IO.Path]::GetFullPath($tempRoot).StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) -Message 'Temporary root escaped the system temp directory.'
 
+# Every mechanism registration in this run lands in a throwaway xloop home, never
+# the real user profile (protocol §3.10). It outlives $tempRoot so the loop C
+# region at the end can inspect what the whole run fired.
+$firedHome = Join-Path ([IO.Path]::GetTempPath()) ('xloop-fired-home-' + [guid]::NewGuid().ToString('N'))
+$savedXloopHome = $env:XLOOP_HOME
+$env:XLOOP_HOME = $firedHome
+
 try {
     $mockBin = Join-Path $tempRoot 'mock bin'
     $mockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $mockBin)
@@ -1437,6 +1444,246 @@ try {
     if ([IO.Directory]::Exists($loopATempRoot)) { Remove-Item -LiteralPath $loopATempRoot -Recurse -Force }
 }
 # ---- end loop A ----
+# ---- Scope loop C (S6, S7, S8) ----
+# Self-contained: the main temp root is gone by now, so this region builds its own
+# mock CLIs and project, and cleans up the shared fired home when it is done.
+$loopCRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-loop-c-smoke-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($loopCRoot) | Out-Null
+$loopCSavedPath = $env:PATH
+try {
+    $common = Join-Path $repo 'skills\xloop\scripts\loop-common.ps1'
+    $stepScript = Join-Path $repo 'skills\xloop\scripts\loop-step.ps1'
+    $statusScript = Join-Path $repo 'skills\xloop\scripts\loop-status.ps1'
+    $initScript = Join-Path $repo 'skills\xloop\scripts\loop-init.ps1'
+    $codexWrapper = Join-Path $repo 'skills\xloop\scripts\loop-codex.ps1'
+    $claudeWrapper = Join-Path $repo 'skills\xloop\scripts\loop-claude.ps1'
+
+    # S7: the whole run above registered into the shared throwaway home. Both
+    # wrappers, the guards, and the failover case have fired there; the names owned
+    # by other loops are known but never fired. Nothing private is in the file.
+    $sharedFiredPath = Join-Path $firedHome 'fired.json'
+    Assert-True -Condition (Test-Path -LiteralPath $sharedFiredPath -PathType Leaf) -Message 'The smoke run did not create the per-machine fired record under XLOOP_HOME.'
+    $sharedFired = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')
+    Assert-True -Condition ($sharedFired.ExitCode -eq 0) -Message "loop-status.ps1 -Fired failed: $($sharedFired.Output)"
+    $sharedFiredJson = $sharedFired.Output | ConvertFrom-Json
+    Assert-True -Condition ($sharedFiredJson.path -eq $sharedFiredPath) -Message "-Fired read the wrong record: $($sharedFiredJson.path)"
+    $firedByName = @{}
+    foreach ($row in $sharedFiredJson.mechanisms) { $firedByName[$row.mechanism] = $row }
+    foreach ($expectedFired in @('wrapper:claude', 'wrapper:codex', 'headless-summon', 'mutation-restore', 'format-nudge', 'resume-fallback', 'quota-failover', 'transition:recon-to-interrogate', 'transition:record-nudge', 'transition:build-inspect')) {
+        Assert-True -Condition ($firedByName.ContainsKey($expectedFired) -and [bool]$firedByName[$expectedFired].fired -and [int]$firedByName[$expectedFired].count -ge 1) -Message "The smoke run should have fired $expectedFired."
+    }
+    Assert-True -Condition ([int]$firedByName['quota-failover'].acted -ge 1) -Message 'The failover smoke case did not record quota-failover as acted.'
+    Assert-True -Condition ([int]$firedByName['mutation-restore'].acted -ge 1 -and [int]$firedByName['mutation-restore'].count -gt [int]$firedByName['mutation-restore'].acted) -Message 'The mutation guard should have both run without acting and acted.'
+    Assert-True -Condition ([int]$firedByName['format-nudge'].acted -ge 1) -Message 'Malformed outputs did not record the format nudge as acted.'
+    Assert-True -Condition ([int]$firedByName['resume-fallback'].acted -ge 1) -Message 'Resume fallbacks did not record as acted.'
+    foreach ($neverExpected in @('ship-check', 'brief-check', 'live-harness', 'provider-probe')) {
+        Assert-True -Condition (@($sharedFiredJson.never_fired) -contains $neverExpected) -Message "Mechanism $neverExpected owned by another loop should be reported as never fired."
+        Assert-True -Condition ($firedByName.ContainsKey($neverExpected) -and [bool]$firedByName[$neverExpected].known) -Message "Mechanism $neverExpected is not in the known list."
+    }
+    $sharedFiredText = [IO.File]::ReadAllText($sharedFiredPath)
+    Assert-True -Condition ($sharedFiredText -notmatch 'Read the packet paths|mock-session|mock-thread') -Message 'The fired record leaked prompt text or a handle.'
+    Assert-True -Condition ($sharedFiredText -notmatch [regex]::Escape((Split-Path -Leaf $tempRoot))) -Message 'The fired record leaked a project path.'
+    Assert-True -Condition ($sharedFiredText -notmatch '(?i)[A-Z]:\\') -Message 'The fired record contains a machine path.'
+    $sharedFiredTable = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired')
+    Assert-True -Condition ($sharedFiredTable.ExitCode -eq 0 -and $sharedFiredTable.Output -match '(?m)^Never fired on this machine: .*\bship-check\b') -Message "The -Fired table did not name the never-fired mechanisms: $($sharedFiredTable.Output)"
+
+    # S7: a fresh home starts empty. One mock summon adds wrapper:claude while the
+    # failover stays never fired, until a failover is driven here.
+    $loopCMockBin = Join-Path $loopCRoot 'mock bin'
+    $loopCMockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $loopCMockBin)
+    Assert-True -Condition ($loopCMockBuild.ExitCode -eq 0) -Message "Loop C mock CLI build failed: $($loopCMockBuild.Output)"
+    $env:PATH = $loopCMockBin + [IO.Path]::PathSeparator + $env:PATH
+    $freshHome = Join-Path $loopCRoot 'fresh home'
+    $env:XLOOP_HOME = $freshHome
+    $loopCProject = Join-Path $loopCRoot 'loop c project'
+    [IO.Directory]::CreateDirectory($loopCProject) | Out-Null
+    $env:XLOOP_MOCK_MODE = 'bom'
+    $loopCInit = Invoke-ChildPowerShell -Script $initScript -Arguments @('-Project', $loopCProject, '-Author', 'claude', '-LoopName', 'loop-c-smoke')
+    Assert-True -Condition ($loopCInit.ExitCode -eq 0) -Message "Loop C project initialization failed: $($loopCInit.Output)"
+    $loopCPrompt = Join-Path $loopCProject '.loop\tmp\packet.txt'
+    [IO.File]::WriteAllText($loopCPrompt, 'Read the packet paths and return the required terminator.', (New-Object Text.UTF8Encoding($false)))
+    $loopCFresh = Join-Path $loopCProject '.loop\tmp\fresh packet.txt'
+    [IO.File]::WriteAllText($loopCFresh, 'FRESH PACKET: read the full-plan packet paths and return the required terminator.', (New-Object Text.UTF8Encoding($false)))
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $freshHome 'fired.json'))) -Message 'Initialization alone must not create the fired record.'
+    $firstSummon = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\rounds\fired-one.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($firstSummon.ExitCode -eq 0) -Message "Loop C first mock summon failed: $($firstSummon.Output)"
+    $freshFired = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')).Output | ConvertFrom-Json
+    $freshByName = @{}
+    foreach ($row in $freshFired.mechanisms) { $freshByName[$row.mechanism] = $row }
+    Assert-True -Condition ([bool]$freshByName['wrapper:claude'].fired -and [int]$freshByName['wrapper:claude'].count -eq 1) -Message 'One mock summon did not record wrapper:claude exactly once.'
+    Assert-True -Condition ($freshByName['wrapper:claude'].first -eq $freshByName['wrapper:claude'].last -and $freshByName['wrapper:claude'].first -match '^\d{4}-\d{2}-\d{2}T') -Message 'wrapper:claude first/last timestamps are malformed.'
+    Assert-True -Condition (-not [bool]$freshByName['wrapper:codex'].fired) -Message 'A Claude summon recorded the Codex wrapper.'
+    Assert-True -Condition (@($freshFired.never_fired) -contains 'quota-failover') -Message 'quota-failover must be never fired before a failover runs.'
+    Assert-True -Condition (@($freshFired.never_fired) -notcontains 'wrapper:claude') -Message 'wrapper:claude was still listed as never fired.'
+    $loopCCalls = Join-Path $loopCRoot 'calls.log'
+    $env:XLOOP_MOCK_CALLS_FILE = $loopCCalls
+    $env:XLOOP_MOCK_CLAUDE_MODE = 'quota'
+    $env:XLOOP_MOCK_CODEX_MODE = 'bom'
+    try {
+        $drivenFailover = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-FreshPromptFile', '.loop\tmp\fresh packet.txt', '-OutFile', '.loop\rounds\fired-failover.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($drivenFailover.ExitCode -eq 0) -Message "Loop C driven failover failed: $($drivenFailover.Output)"
+        Assert-True -Condition ((@([IO.File]::ReadAllLines($loopCCalls)) -join ',') -eq 'claude:quota,codex:bom') -Message 'Loop C failover did not cross to the alternate provider.'
+    } finally {
+        Remove-Item Env:XLOOP_MOCK_CALLS_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:XLOOP_MOCK_CLAUDE_MODE -ErrorAction SilentlyContinue
+        Remove-Item Env:XLOOP_MOCK_CODEX_MODE -ErrorAction SilentlyContinue
+    }
+    $afterFailover = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')).Output | ConvertFrom-Json
+    $afterByName = @{}
+    foreach ($row in $afterFailover.mechanisms) { $afterByName[$row.mechanism] = $row }
+    Assert-True -Condition (@($afterFailover.never_fired) -notcontains 'quota-failover') -Message 'quota-failover is still never fired after a driven failover.'
+    Assert-True -Condition ([int]$afterByName['quota-failover'].count -eq 1 -and [int]$afterByName['quota-failover'].acted -eq 1) -Message "quota-failover ran/acted counts are wrong: $($afterByName['quota-failover'] | ConvertTo-Json -Compress)"
+    Assert-True -Condition ([int]$afterByName['wrapper:codex'].count -eq 1) -Message 'The alternate wrapper did not register itself during failover.'
+    Assert-True -Condition ([int]$afterByName['wrapper:claude'].count -eq 2) -Message 'The second Claude summon did not increment wrapper:claude.'
+
+    # A corrupt record is tolerated: the next registration rewrites it, and a
+    # missing record never changes the summon's own result.
+    $freshFiredPath = Join-Path $freshHome 'fired.json'
+    [IO.File]::WriteAllText($freshFiredPath, '{"schema": 1, "mechanisms": ', (New-Object Text.UTF8Encoding($false)))
+    $afterCorrupt = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\rounds\fired-corrupt.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($afterCorrupt.ExitCode -eq 0) -Message "A corrupt fired record changed a summon result: $($afterCorrupt.Output)"
+    $recovered = [IO.File]::ReadAllText($freshFiredPath) | ConvertFrom-Json
+    Assert-True -Condition ([int]$recovered.mechanisms.'wrapper:codex'.count -eq 1) -Message 'A corrupt fired record was not rewritten from empty.'
+    Remove-Item -LiteralPath $freshFiredPath -Force
+    $afterMissing = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired')
+    Assert-True -Condition ($afterMissing.ExitCode -eq 0 -and $afterMissing.Output -match 'Never fired on this machine: wrapper:claude') -Message "A missing fired record broke -Fired: $($afterMissing.Output)"
+    $directRegister = Invoke-ChildCommand -Command (". '$common'; Write-Output (Register-XloopFired -Mechanism 'provider-probe' -Acted); Write-Output ((Get-XloopFiredReport).NeverFired -contains 'provider-probe')")
+    Assert-True -Condition ((($directRegister.Output -split "`n") | ForEach-Object { $_.Trim() }) -join ',' -ceq 'True,False') -Message "Register-XloopFired is not callable directly: $($directRegister.Output)"
+    $loopCDoctor = Invoke-ChildPowerShell -Script (Join-Path $repo 'scripts\doctor.ps1') -Arguments @('-CodexPath', (Join-Path $loopCMockBin 'codex.exe'), '-ClaudePath', (Join-Path $loopCMockBin 'claude.exe'))
+    Assert-True -Condition ($loopCDoctor.Output -match 'Never fired on this machine: .*\bship-check\b') -Message "doctor.ps1 did not print the fired table: $($loopCDoctor.Output)"
+    $doctorJsonText = (($loopCDoctor.Output -split "`n") | Where-Object { $_ -notmatch '^(Fired record:|mechanism |Never fired|Every known|[a-z-]+(:[a-z-]+)? +(\d{4}-|never))' }) -join "`n"
+    $doctorJson = $doctorJsonText | ConvertFrom-Json
+    Assert-True -Condition (@($doctorJson.checks.fired.never_fired) -contains 'live-harness' -and @($doctorJson.checks.fired.mechanisms).Count -ge 29) -Message 'doctor.ps1 JSON does not carry the fired table.'
+
+    # S6: a correction record needs evidence; record-correction refuses one
+    # without it and appends a validated record exactly once.
+    $s6Project = Join-Path $loopCRoot 's6 project'
+    [IO.Directory]::CreateDirectory($s6Project) | Out-Null
+    $s6Init = Invoke-ChildPowerShell -Script $initScript -Arguments @('-Project', $s6Project, '-Author', 'codex', '-LoopName', 's6-smoke')
+    Assert-True -Condition ($s6Init.ExitCode -eq 0) -Message "S6 project initialization failed: $($s6Init.Output)"
+    $s6Questions = Join-Path $s6Project '.loop\QUESTIONS.md'
+    $s6StatePath = Join-Path $s6Project '.loop\STATE.md'
+    $s6Batch = "# Questions`r`n`r`nQ: Which retry policy?`r`nWhy load-bearing: it changes the failure mode.`r`nOptions: A exponential | B fixed`r`nRecommended: A because it is the codebase convention`r`nDefault-if-silent: A`r`nAnswer: B`r`n`r`nQ: Keep the debug flag?`r`nWhy load-bearing: user-visible.`r`nOptions: yes | no`r`nRecommended: yes because it is cheap`r`nDefault-if-silent: yes`r`nAnswer: yes`r`n`r`nQ: Proof command?`r`nWhy load-bearing: build gate.`r`nOptions: npm test | none`r`nRecommended: npm test because it exists`r`nDefault-if-silent: npm test`r`nDefault applied: npm test`r`n"
+    [IO.File]::WriteAllText($s6Questions, $s6Batch, (New-Object Text.UTF8Encoding($false)))
+    $s6BatchBytes = [IO.File]::ReadAllBytes($s6Questions)
+    $noEvidence = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'visible means a console window, not a log', '-Ruling', 'user_right')
+    Assert-True -Condition ($noEvidence.ExitCode -eq 1 -and $noEvidence.Output -match 'without evidence') -Message "record-correction accepted a ruling without evidence: $($noEvidence.Output)"
+    Assert-True -Condition (@(Compare-Object $s6BatchBytes ([IO.File]::ReadAllBytes($s6Questions)) -SyncWindow 0).Count -eq 0) -Message 'A refused correction still touched QUESTIONS.md.'
+    $blankEvidence = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'visible means a console window, not a log', '-Ruling', 'user_right', '-Evidence', ' ')
+    Assert-True -Condition ($blankEvidence.ExitCode -eq 1) -Message 'record-correction accepted blank evidence.'
+    $noRuling = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'visible means a console window, not a log', '-Evidence', 'loop-common.ps1 Get-LoopVisiblePreference')
+    Assert-True -Condition ($noRuling.ExitCode -eq 1) -Message 'record-correction accepted a record without a ruling.'
+    $userRight = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'visible means a console window, not a log', '-Ruling', 'user_right', '-Evidence', 'loop-common.ps1 Get-LoopVisiblePreference')
+    Assert-True -Condition ($userRight.ExitCode -eq 0 -and (($userRight.Output | ConvertFrom-Json).applied) -eq $true) -Message "A valid correction record was refused: $($userRight.Output)"
+    $s6After = [IO.File]::ReadAllText($s6Questions)
+    Assert-True -Condition ($s6After.StartsWith($s6Batch)) -Message 'record-correction rewrote the existing question batch.'
+    Assert-True -Condition ($s6After -match '(?m)^Correction \[recon/0\]: visible means a console window, not a log\r?$\r?\n^Ruling: user_right\r?$\r?\n^Evidence: loop-common\.ps1 Get-LoopVisiblePreference\r?$') -Message "The correction record is not the three-line schema: $s6After"
+    $userRightReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'visible means a console window, not a log', '-Ruling', 'user_right', '-Evidence', 'loop-common.ps1 Get-LoopVisiblePreference')
+    Assert-True -Condition ($userRightReplay.ExitCode -eq 0 -and (($userRightReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying a correction record was not idempotent.'
+    Assert-True -Condition ([IO.File]::ReadAllText($s6Questions) -ceq $s6After) -Message 'A replayed correction record was appended twice.'
+    $unresolved = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'the fix cap is three', '-Ruling', 'unresolved', '-Evidence', 'none')
+    Assert-True -Condition ($unresolved.ExitCode -eq 0) -Message "An unresolved correction was refused: $($unresolved.Output)"
+    $agentRight = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-correction', '-Correction', 'the brief was never verified', '-Ruling', 'agent_right', '-Evidence', 'git -C <project> log -1 --format=%H 1a2b3c4')
+    Assert-True -Condition ($agentRight.ExitCode -eq 0) -Message "An agent_right correction was refused: $($agentRight.Output)"
+    Assert-True -Condition ([IO.File]::ReadAllText($s6StatePath) -match '(?m)^phase: recon\s*$') -Message 'record-correction changed the phase.'
+    # A malformed record already in the file (a ruling with no evidence) is dropped,
+    # never promoted.
+    [IO.File]::AppendAllText($s6Questions, "`r`nCorrection [recon/0]: the ledger holds prompts`r`nRuling: user_right`r`n", (New-Object Text.UTF8Encoding($false)))
+
+    # S6: one user_right, one unresolved, one agent_right, one malformed, one
+    # overridden default, one accepted default, and one applied default yield
+    # exactly two lesson entries.
+    $promotions = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $s6Project, '-Corrections', '-AsJson')
+    Assert-True -Condition ($promotions.ExitCode -eq 0) -Message "loop-status.ps1 -Corrections failed: $($promotions.Output)"
+    $promotionJson = $promotions.Output | ConvertFrom-Json
+    Assert-True -Condition (@($promotionJson.lessons).Count -eq 2) -Message "Expected exactly two lesson entries, got $(@($promotionJson.lessons).Count): $($promotions.Output)"
+    $overrideEntry = @($promotionJson.lessons | Where-Object { $_.kind -eq 'override' })
+    $correctionEntry = @($promotionJson.lessons | Where-Object { $_.kind -eq 'correction' })
+    Assert-True -Condition ($overrideEntry.Count -eq 1 -and $overrideEntry[0].text -eq 'Which retry policy?' -and $overrideEntry[0].recommended -eq 'A' -and $overrideEntry[0].ruling -eq 'B' -and $overrideEntry[0].tag -eq '[user-ruling]') -Message "The overridden default was not promoted with recommendation and ruling side by side: $($promotions.Output)"
+    Assert-True -Condition ($correctionEntry.Count -eq 1 -and $correctionEntry[0].ruling -eq 'user_right' -and $correctionEntry[0].evidence -eq 'loop-common.ps1 Get-LoopVisiblePreference' -and $correctionEntry[0].source -eq 'recon/0') -Message "The user_right correction was not promoted: $($promotions.Output)"
+    Assert-True -Condition (@($promotionJson.dropped).Count -eq 1 -and $promotionJson.dropped[0].reason -eq 'ruling without Evidence') -Message "The malformed record was not dropped: $($promotions.Output)"
+    Assert-True -Condition ($null -eq $promotionJson.rating) -Message 'A rating was reported before any was recorded.'
+    $promotionText = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $s6Project, '-Corrections')
+    Assert-True -Condition ($promotionText.Output -match '(?m)^Lesson promotions from QUESTIONS\.md: 2\s*$' -and $promotionText.Output -match 'recommended: A \| user: B') -Message "The text promotion list is wrong: $($promotionText.Output)"
+
+    # S6: the closing rating is asked once after done. A skipped rating writes
+    # nothing; a low rating carries feedback; a second different rating is refused.
+    $s6Rating = Join-Path $s6Project '.loop\RATING.md'
+    $ratingEarly = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating', '-Rating', '5')
+    Assert-True -Condition ($ratingEarly.ExitCode -eq 1 -and -not (Test-Path -LiteralPath $s6Rating)) -Message 'A rating was recorded before the run was done.'
+    $s6StateText = [IO.File]::ReadAllText($s6StatePath) -replace '(?m)^phase: recon(?=\r?$)', 'phase: done' -replace '(?m)^lock: [^\r\n]*', 'lock:'
+    [IO.File]::WriteAllText($s6StatePath, $s6StateText, (New-Object Text.UTF8Encoding($false)))
+    $ratingNoFeedback = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating', '-Rating', '2')
+    Assert-True -Condition ($ratingNoFeedback.ExitCode -eq 1 -and -not (Test-Path -LiteralPath $s6Rating)) -Message 'A rating of 2 was accepted without a Feedback line.'
+    $ratingSkip = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating')
+    Assert-True -Condition ($ratingSkip.ExitCode -eq 1 -and -not (Test-Path -LiteralPath $s6Rating)) -Message 'A skipped rating wrote a record.'
+    $ratingLow = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating', '-Rating', '3', '-Feedback', 'too many summons for one flag')
+    Assert-True -Condition ($ratingLow.ExitCode -eq 0) -Message "A rating with feedback was refused: $($ratingLow.Output)"
+    Assert-True -Condition ([IO.File]::ReadAllText($s6Rating) -ceq "Rating: 3`r`nFeedback: too many summons for one flag`r`n") -Message "RATING.md is not the two-line schema: $([IO.File]::ReadAllText($s6Rating))"
+    $ratingReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating', '-Rating', '3', '-Feedback', 'too many summons for one flag')
+    Assert-True -Condition ($ratingReplay.ExitCode -eq 0 -and (($ratingReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying the same rating was not idempotent.'
+    $ratingAgain = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $s6Project, '-Transition', 'record-rating', '-Rating', '5')
+    Assert-True -Condition ($ratingAgain.ExitCode -eq 1 -and [IO.File]::ReadAllText($s6Rating) -match '^Rating: 3') -Message 'A second, different rating replaced the first.'
+    Assert-True -Condition ([IO.File]::ReadAllText($s6StatePath) -match '(?m)^lock:\s*$' -and [IO.File]::ReadAllText($s6StatePath) -match '(?m)^phase: done\s*$') -Message 'record-rating re-acquired the lock or changed the phase.'
+    $ratedPromotions = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $s6Project, '-Corrections', '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition ($ratedPromotions.rating.rating -eq 3 -and $ratedPromotions.rating.tag -eq '[rating]' -and $ratedPromotions.rating.feedback -eq 'too many summons for one flag' -and @($ratedPromotions.lessons).Count -eq 2) -Message "The rating was not derived beside the ruling promotions: $($ratedPromotions | ConvertTo-Json -Compress)"
+    $recordFired = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($recordFired.never_fired) -notcontains 'transition:record-correction' -and @($recordFired.never_fired) -notcontains 'transition:record-rating') -Message 'The record transitions did not register in the fired record.'
+
+    # The closeout packet names the question batch so the promotion rule has its
+    # input; rendering with the full token set succeeds.
+    $renderScript = Join-Path $repo 'skills\xloop\scripts\loop-render.ps1'
+    $closeoutValues = "protocol_path=.loop/PROTOCOL.md`r`nstate_path=.loop/STATE.md`r`nplan_path=.loop/PLAN.md`r`nreview_log_path=.loop/REVIEW-LOG.md`r`nquestions_path=.loop/QUESTIONS.md`r`nwiki_inbox_path=.loop/wiki-inbox.md`r`ndiff_path=.loop/build/b1.diff`r`nreport_path=.loop/build/b1-report.md`r`nbrief_path=wiki/references/codebase-brief.md`r`nwiki_path=.wiki`r`noutput_path=.loop/CLOSEOUT-REPORT.md`r`n"
+    [IO.File]::WriteAllText((Join-Path $s6Project '.loop\tmp\closeout-values.txt'), $closeoutValues, (New-Object Text.UTF8Encoding($false)))
+    $closeoutRender = Invoke-ChildPowerShell -Script $renderScript -Arguments @('-Project', $s6Project, '-Template', 'closeout.txt', '-OutFile', '.loop\tmp\closeout-packet.txt', '-ValuesFile', '.loop\tmp\closeout-values.txt')
+    Assert-True -Condition ($closeoutRender.ExitCode -eq 0) -Message "closeout.txt did not render with the question batch token: $($closeoutRender.Output)"
+    Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $s6Project '.loop\tmp\closeout-packet.txt')) -match '(?m)^Questions: \.loop/QUESTIONS\.md\s*$') -Message 'The rendered closeout packet does not name the question batch.'
+
+    # S8: two contradicting lessons where the newer supersedes the older. Recon's
+    # bounded grep cites only the newer; a superseded note is never served.
+    $fixtureWiki = Join-Path $loopCRoot 'fixture wiki'
+    $fixtureNotes = Join-Path $fixtureWiki 'raw\notes'
+    [IO.Directory]::CreateDirectory($fixtureNotes) | Out-Null
+    $olderStem = '2026-08-01-ll-retry-policy'
+    $newerStem = '2026-09-01-ll-retry-policy-reversed'
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($olderStem + '.md')), "---`ntitle: Retry policy lesson`nlesson_kind: lessons-learned`nloop: 2026-08-01-retry`nsupersedes:`nsuperseded-by: $newerStem`n---`nExponential backoff caused duplicate POSTs; use fixed retries.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($newerStem + '.md')), "---`ntitle: Retry policy lesson (reversed)`nlesson_kind: lessons-learned`nloop: 2026-09-01-retry-fix`nsupersedes: $olderStem`nsuperseded-by:`n---`nThe duplicates came from a missing idempotency key; exponential backoff is correct.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes '2026-07-15-ll-unrelated.md'), "---`ntitle: Unrelated lesson`nlesson_kind: lessons-learned`nsupersedes:`nsuperseded-by:`n---`nKeep the proof command in STATE.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes '2026-09-02-not-a-lesson.md'), "---`ntitle: Meeting note`n---`nNot a lesson.`n", $utf8)
+    $lessonGrep = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-AsJson')
+    Assert-True -Condition ($lessonGrep.ExitCode -eq 0) -Message "loop-status.ps1 -Lessons failed: $($lessonGrep.Output)"
+    $lessonJson = $lessonGrep.Output | ConvertFrom-Json
+    $lessonNames = @($lessonJson.lessons | ForEach-Object { $_.name })
+    Assert-True -Condition ($lessonNames.Count -eq 2) -Message "Expected two live lesson notes, got: $($lessonNames -join ', ')"
+    Assert-True -Condition ($lessonNames[0] -eq ($newerStem + '.md') -and $lessonNames[1] -eq '2026-07-15-ll-unrelated.md') -Message "The lessons grep did not return the newest live notes in order: $($lessonNames -join ', ')"
+    Assert-True -Condition ($lessonNames -notcontains ($olderStem + '.md')) -Message 'The superseded lesson was still cited.'
+    Assert-True -Condition ($lessonJson.lessons[0].supersedes -eq $olderStem) -Message 'The newer note did not report what it supersedes.'
+    $lessonText = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-Max', '1')
+    Assert-True -Condition ($lessonText.Output -match [regex]::Escape($newerStem) -and $lessonText.Output -notmatch [regex]::Escape($olderStem + '.md') -and $lessonText.Output -match "\(supersedes $olderStem\)") -Message "The -Max 1 lessons listing is wrong: $($lessonText.Output)"
+    # Retiring only one side is still visible: a note that names supersedes: but
+    # whose target was never marked superseded-by: leaves both live, which is the
+    # dangling state the brief check reports.
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($olderStem + '.md')), "---`ntitle: Retry policy lesson`nlesson_kind: lessons-learned`nsupersedes:`nsuperseded-by:`n---`nExponential backoff caused duplicate POSTs; use fixed retries.`n", $utf8)
+    $bothLive = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($bothLive.lessons).Count -eq 3) -Message 'A note without superseded-by: set was excluded.'
+    # The project route reads the wiki root from STATE and refuses no-wiki mode.
+    $noWikiLessons = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $loopCProject, '-Lessons')
+    Assert-True -Condition ($noWikiLessons.ExitCode -eq 1) -Message 'No-wiki mode produced a lessons list.'
+    $setWiki = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $loopCProject, '-Transition', 'refresh-lock', '-Wiki', $fixtureWiki)
+    Assert-True -Condition ($setWiki.ExitCode -eq 0) -Message "Recording the wiki root failed: $($setWiki.Output)"
+    $projectLessons = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $loopCProject, '-Lessons', '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($projectLessons.lessons).Count -eq 3 -and $projectLessons.wiki -eq $fixtureWiki) -Message "The project route did not read the wiki root from STATE: $($projectLessons | ConvertTo-Json -Compress)"
+    $missingNotes = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', (Join-Path $loopCRoot 'no such wiki'), '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($missingNotes.lessons).Count -eq 0) -Message 'A wiki without raw/notes did not read as zero lessons.'
+} finally {
+    $env:PATH = $loopCSavedPath
+    Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
+    if ($null -eq $savedXloopHome) { Remove-Item Env:XLOOP_HOME -ErrorAction SilentlyContinue } else { $env:XLOOP_HOME = $savedXloopHome }
+    if ([IO.Directory]::Exists($loopCRoot)) { [IO.Directory]::Delete($loopCRoot, $true) }
+    if ([IO.Directory]::Exists($firedHome)) { [IO.Directory]::Delete($firedHome, $true) }
+}
+# ---- end loop C ----
 
 Write-Output 'Offline PowerShell 5.1 smoke tests passed.'
 exit 0

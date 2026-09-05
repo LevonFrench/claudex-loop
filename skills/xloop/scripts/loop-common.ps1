@@ -2152,3 +2152,342 @@ function Update-LoopAssumptionsForBriefCheck {
     }
     return @{ downgraded = $downgraded; appended = $appended }
 }
+function Get-LoopRecommendedChoice {
+    # `Recommended: <option> because <reason>` -> the option; the reason is prose.
+    param([AllowEmptyString()][string]$Value)
+
+    $choice = [regex]::Split($Value, '(?i)\s+because\s+')[0]
+    return $choice.Trim().TrimEnd('.').Trim()
+}
+
+function Test-LoopAnswerOverridesRecommendation {
+    <#
+    An answer overrides the recommendation when it names a different choice. The
+    comparison is clerical: exact option text, or the option's leading token
+    (`B` for `B (skip)`), or the batch words `defaults`/`default`/`recommended`,
+    all count as accepting the recommendation.
+    #>
+    param([AllowEmptyString()][string]$Recommended, [AllowEmptyString()][string]$Answer)
+
+    $choice = Get-LoopRecommendedChoice -Value $Recommended
+    $reply = $Answer.Trim().TrimEnd('.').Trim()
+    if ([string]::IsNullOrWhiteSpace($choice) -or [string]::IsNullOrWhiteSpace($reply)) { return $false }
+    if ($reply -in @('defaults', 'default', 'recommended')) { return $false }
+    if ($reply.Equals($choice, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $choiceToken = ($choice -split '\s+')[0].TrimEnd(':', ')', ',')
+    $replyToken = ($reply -split '\s+')[0].TrimEnd(':', ')', ',')
+    if ($choiceToken -and $replyToken -and $replyToken.Equals($choiceToken, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $true
+}
+
+function Get-LoopCorrectionPromotions {
+    <#
+    Clerical derivation of the closeout promotion list from QUESTIONS.md and
+    RATING.md (protocol §3.6, §3.8). Promoted as [user-ruling]: every correction
+    record ruled user_right that carries an Evidence line, and every question
+    whose Answer overrides its Recommended choice. Promoted as [rating]: a
+    recorded closing rating. A ruling without evidence is malformed: it is listed
+    under Dropped and never promoted. agent_right and unresolved rulings promote
+    nothing. This function reads only; it never decides a ruling.
+    #>
+    param([string]$QuestionsPath, [string]$RatingPath = '')
+
+    $lessons = New-Object System.Collections.ArrayList
+    $dropped = New-Object System.Collections.ArrayList
+    $rating = $null
+
+    if ($QuestionsPath -and [System.IO.File]::Exists($QuestionsPath)) {
+        $lines = @([System.IO.File]::ReadAllText($QuestionsPath).TrimStart([char]0xFEFF) -split "`r?`n")
+        $question = $null
+        $flushQuestion = {
+            if ($null -ne $question -and $question.Recommended -and $question.Answer -and (Test-LoopAnswerOverridesRecommendation -Recommended $question.Recommended -Answer $question.Answer)) {
+                [void]$lessons.Add([ordered]@{
+                    tag = '[user-ruling]'
+                    kind = 'override'
+                    source = 'Q'
+                    text = $question.Text
+                    recommended = (Get-LoopRecommendedChoice -Value $question.Recommended)
+                    ruling = $question.Answer
+                    evidence = ''
+                })
+            }
+        }
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            $correction = [regex]::Match($line, '^Correction \[(?<where>[^\]]+)\]:\s*(?<words>\S.*)$')
+            if ($correction.Success) {
+                & $flushQuestion
+                $question = $null
+                $rulingValue = ''
+                $evidenceValue = ''
+                $cursor = $i + 1
+                while ($cursor -lt $lines.Count -and [string]::IsNullOrWhiteSpace($lines[$cursor])) { $cursor++ }
+                if ($cursor -lt $lines.Count -and $lines[$cursor] -match '^Ruling:\s*(?<ruling>\S.*)$') {
+                    $rulingValue = $Matches['ruling'].Trim()
+                    $cursor++
+                    while ($cursor -lt $lines.Count -and [string]::IsNullOrWhiteSpace($lines[$cursor])) { $cursor++ }
+                    if ($cursor -lt $lines.Count -and $lines[$cursor] -match '^Evidence:\s*(?<evidence>\S.*)$') { $evidenceValue = $Matches['evidence'].Trim() }
+                }
+                $entry = [ordered]@{
+                    tag = '[user-ruling]'
+                    kind = 'correction'
+                    source = $correction.Groups['where'].Value
+                    text = $correction.Groups['words'].Value.Trim()
+                    recommended = ''
+                    ruling = $rulingValue
+                    evidence = $evidenceValue
+                }
+                if ($rulingValue -notin @('user_right', 'agent_right', 'unresolved')) {
+                    $entry['reason'] = 'malformed ruling'
+                    [void]$dropped.Add($entry)
+                } elseif (-not $evidenceValue) {
+                    $entry['reason'] = 'ruling without Evidence'
+                    [void]$dropped.Add($entry)
+                } elseif ($rulingValue -eq 'user_right') {
+                    [void]$lessons.Add($entry)
+                }
+                continue
+            }
+            if ($line -match '^Q:\s*(?<text>\S.*)$') {
+                & $flushQuestion
+                $question = [pscustomobject]@{ Text = $Matches['text'].Trim(); Recommended = ''; Answer = '' }
+                continue
+            }
+            if ($null -eq $question) { continue }
+            if ($line -match '^Recommended:\s*(?<value>\S.*)$') { $question.Recommended = $Matches['value'].Trim(); continue }
+            if ($line -match '^Answer:\s*(?<value>\S.*)$') { $question.Answer = $Matches['value'].Trim(); continue }
+        }
+        & $flushQuestion
+    }
+
+    if ($RatingPath -and [System.IO.File]::Exists($RatingPath)) {
+        $ratingText = [System.IO.File]::ReadAllText($RatingPath).TrimStart([char]0xFEFF)
+        $ratingMatch = [regex]::Match($ratingText, '(?m)^Rating:[ \t]*([1-5])[ \t]*\r?$')
+        if ($ratingMatch.Success) {
+            $feedbackMatch = [regex]::Match($ratingText, '(?m)^Feedback:[ \t]*(\S[^\r\n]*)')
+            $rating = [ordered]@{
+                tag = '[rating]'
+                kind = 'rating'
+                rating = [int]$ratingMatch.Groups[1].Value
+                feedback = if ($feedbackMatch.Success) { $feedbackMatch.Groups[1].Value.Trim() } else { '' }
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Lessons = @($lessons); Dropped = @($dropped); Rating = $rating }
+}
+
+function Get-LoopRecentLessons {
+    <#
+    Recon's bounded lessons grep (protocol §5, §3.8): the newest lesson notes under
+    <wiki>/raw/notes with `lesson_kind: lessons-learned`, excluding any note whose
+    `superseded-by:` field is set, so a retired lesson is never served beside the
+    one that replaced it. Newest is by the note's YYYY-MM-DD filename prefix, then
+    by name. Reads only; never opens anything outside raw/notes.
+    #>
+    param([Parameter(Mandatory = $true)][string]$WikiRoot, [ValidateRange(1, 50)][int]$Max = 5)
+
+    $notesRoot = Join-Path $WikiRoot 'raw\notes'
+    if (-not [System.IO.Directory]::Exists($notesRoot)) { return @() }
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($file in @(Get-ChildItem -LiteralPath $notesRoot -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+        $text = ''
+        try { $text = [System.IO.File]::ReadAllText($file.FullName).TrimStart([char]0xFEFF) } catch { continue }
+        if ($text -notmatch '(?m)^lesson_kind:[ \t]*lessons-learned[ \t]*\r?$') { continue }
+        # A blank field is a blank line: never let whitespace matching cross into
+        # the next frontmatter line.
+        $superseded = [regex]::Match($text, '(?m)^superseded-by:[ \t]*(\S[^\r\n]*)')
+        if ($superseded.Success) { continue }
+        $supersedes = [regex]::Match($text, '(?m)^supersedes:[ \t]*(\S[^\r\n]*)')
+        $stamp = [regex]::Match($file.Name, '^(\d{4}-\d{2}-\d{2})')
+        [void]$candidates.Add([pscustomobject]@{
+            Path = $file.FullName
+            Name = $file.Name
+            Date = if ($stamp.Success) { $stamp.Groups[1].Value } else { '0000-00-00' }
+            Supersedes = if ($supersedes.Success) { $supersedes.Groups[1].Value.Trim() } else { '' }
+        })
+    }
+    return @($candidates | Sort-Object -Property @{ Expression = 'Date'; Descending = $true }, @{ Expression = 'Name'; Descending = $true } | Select-Object -First $Max)
+}
+
+function Get-XloopHome {
+    <#
+    Per-machine xloop bookkeeping lives under the user profile, never under a
+    project: the fired record answers "has this mechanism ever run here", and
+    "here" is the machine. XLOOP_HOME redirects it so a test suite never touches
+    the real profile.
+    #>
+    if (-not [string]::IsNullOrWhiteSpace($env:XLOOP_HOME)) { return [System.IO.Path]::GetFullPath($env:XLOOP_HOME) }
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profile)) { $profile = $env:USERPROFILE }
+    if ([string]::IsNullOrWhiteSpace($profile)) { $profile = $env:HOME }
+    if ([string]::IsNullOrWhiteSpace($profile)) { throw 'Cannot resolve a user profile directory for the xloop home.' }
+    return [System.IO.Path]::GetFullPath((Join-Path $profile '.xloop'))
+}
+
+function Get-XloopFiredPath {
+    return (Join-Path (Get-XloopHome) 'fired.json')
+}
+
+function Get-XloopKnownMechanism {
+    <#
+    Every mechanism xloop can fire, including those whose code belongs to other
+    scope loops (ship check, brief check, live harness, provider probe). Naming
+    them here means -Fired reports them as never fired instead of not knowing them.
+    #>
+    $transitions = @(
+        'recon-to-interrogate', 'interrogate-to-review', 'review-next-round', 'review-approve', 'review-escalate',
+        'build-pin', 'build-inspect', 'build-fix', 'build-complete', 'build-escalate', 'build-to-closeout',
+        'closeout-next', 'closeout-done', 'record-nudge', 'record-correction', 'record-rating', 'refresh-lock'
+    )
+    $names = New-Object System.Collections.ArrayList
+    [void]$names.Add('wrapper:claude')
+    [void]$names.Add('wrapper:codex')
+    foreach ($transition in $transitions) { [void]$names.Add('transition:' + $transition) }
+    foreach ($name in @('format-nudge', 'mutation-restore', 'quota-failover', 'resume-fallback', 'visible-summon', 'headless-summon', 'ship-check', 'brief-check', 'live-harness', 'provider-probe')) {
+        [void]$names.Add($name)
+    }
+    return @($names)
+}
+
+function Get-XloopGuardMechanism {
+    # Guards run more often than they act; both counts are kept so a guard that has
+    # run a hundred times and never restored anything is distinguishable from one
+    # that never ran.
+    return @('format-nudge', 'mutation-restore', 'quota-failover', 'resume-fallback', 'ship-check', 'brief-check', 'provider-probe')
+}
+
+function Read-XloopFired {
+    <#
+    Returns the fired record as an ordered dictionary of mechanism -> counters.
+    A missing or corrupt file reads as empty: the record is advisory bookkeeping
+    and must never stop a summon.
+    #>
+    param([string]$Path = '')
+
+    if (-not $Path) { $Path = Get-XloopFiredPath }
+    $record = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    if (-not [System.IO.File]::Exists($Path)) { return $record }
+    try {
+        $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+        if ([string]::IsNullOrWhiteSpace($text)) { return $record }
+        $parsed = $text | ConvertFrom-Json
+        if ($null -eq $parsed -or -not ($parsed.PSObject.Properties.Name -contains 'mechanisms')) { return $record }
+        foreach ($property in $parsed.mechanisms.PSObject.Properties) {
+            $entry = $property.Value
+            if ($null -eq $entry) { continue }
+            $counts = [ordered]@{ first = ''; last = ''; count = 0; acted = 0 }
+            foreach ($key in @('first', 'last')) {
+                if ($entry.PSObject.Properties.Name -contains $key) { $counts[$key] = [string]$entry.$key }
+            }
+            foreach ($key in @('count', 'acted')) {
+                if ($entry.PSObject.Properties.Name -contains $key) {
+                    $value = 0
+                    if ([int]::TryParse([string]$entry.$key, [ref]$value) -and $value -ge 0) { $counts[$key] = $value }
+                }
+            }
+            $record[$property.Name] = $counts
+        }
+    } catch {
+        # Corrupt JSON is treated as empty and overwritten by the next registration.
+        return (New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal))
+    }
+    return $record
+}
+
+function Register-XloopFired {
+    <#
+    Records that a mechanism fired on this machine: first and last timestamp and a
+    count, plus how many of those firings acted (for guards, "acted" means it found
+    something to restore, fail over, or report). Names and timestamps only: no
+    project paths, prompts, handles, or identities. The write is atomic and
+    serialized across processes; any failure is swallowed so a wrapper can call it
+    from anywhere without changing its own exit semantics.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)?$')][string]$Mechanism,
+        [switch]$Acted
+    )
+
+    try {
+        $path = Get-XloopFiredPath
+        $stamp = [datetimeoffset]::Now.ToString('yyyy-MM-ddTHH:mm:sszzz')
+        $mutexName = 'Local\xloop-fired-' + [BitConverter]::ToString([System.Security.Cryptography.SHA1]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($path.ToLowerInvariant()))).Replace('-', '').Substring(0, 16)
+        $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+        $held = $false
+        try {
+            try { $held = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+            $record = Read-XloopFired -Path $path
+            if ($record.Contains($Mechanism)) {
+                $entry = $record[$Mechanism]
+            } else {
+                $entry = [ordered]@{ first = $stamp; last = $stamp; count = 0; acted = 0 }
+                $record[$Mechanism] = $entry
+            }
+            if (-not $entry['first']) { $entry['first'] = $stamp }
+            $entry['last'] = $stamp
+            $entry['count'] = [int]$entry['count'] + 1
+            if ($Acted) { $entry['acted'] = [int]$entry['acted'] + 1 }
+            $mechanisms = [ordered]@{}
+            foreach ($name in @($record.Keys | Sort-Object)) { $mechanisms[$name] = $record[$name] }
+            $document = [ordered]@{ schema = 1; updated = $stamp; mechanisms = $mechanisms }
+            Write-Utf8NoBomAtomic -Path $path -Content (($document | ConvertTo-Json -Depth 4) + "`n")
+        } finally {
+            if ($held) { try { $mutex.ReleaseMutex() } catch { } }
+            $mutex.Dispose()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-XloopFiredReport {
+    <#
+    One row per known mechanism plus any unknown name the file already carries,
+    and the list of known mechanisms that have never fired on this machine.
+    #>
+    param([string]$Path = '')
+
+    if (-not $Path) { $Path = Get-XloopFiredPath }
+    $record = Read-XloopFired -Path $path
+    $guards = Get-XloopGuardMechanism
+    $rows = New-Object System.Collections.ArrayList
+    $never = New-Object System.Collections.ArrayList
+    $names = New-Object System.Collections.ArrayList
+    foreach ($name in (Get-XloopKnownMechanism)) { [void]$names.Add($name) }
+    foreach ($name in @($record.Keys)) { if (-not $names.Contains($name)) { [void]$names.Add($name) } }
+    foreach ($name in $names) {
+        $known = ((Get-XloopKnownMechanism) -contains $name)
+        $isGuard = ($guards -contains $name)
+        if ($record.Contains($name) -and [int]$record[$name]['count'] -gt 0) {
+            $entry = $record[$name]
+            [void]$rows.Add([ordered]@{ mechanism = $name; known = $known; guard = $isGuard; fired = $true; first = [string]$entry['first']; last = [string]$entry['last']; count = [int]$entry['count']; acted = [int]$entry['acted'] })
+        } else {
+            [void]$rows.Add([ordered]@{ mechanism = $name; known = $known; guard = $isGuard; fired = $false; first = ''; last = ''; count = 0; acted = 0 })
+            if ($known) { [void]$never.Add($name) }
+        }
+    }
+    return [pscustomobject]@{ Path = $Path; Rows = @($rows); NeverFired = @($never) }
+}
+
+function Format-XloopFiredReport {
+    param($Report)
+
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(('Fired record: {0}' -f $Report.Path))
+    [void]$lines.Add(('{0,-34} {1,-25} {2,-25} {3,6} {4,6}' -f 'mechanism', 'first', 'last', 'ran', 'acted'))
+    foreach ($row in $Report.Rows) {
+        $first = if ($row['fired']) { $row['first'] } else { 'never' }
+        $last = if ($row['fired']) { $row['last'] } else { 'never' }
+        $acted = if ($row['guard']) { [string]$row['acted'] } else { '-' }
+        $suffix = if (-not $row['known']) { ' (unknown)' } else { '' }
+        [void]$lines.Add(('{0,-34} {1,-25} {2,-25} {3,6} {4,6}{5}' -f $row['mechanism'], $first, $last, $row['count'], $acted, $suffix))
+    }
+    if (@($Report.NeverFired).Count -gt 0) {
+        [void]$lines.Add('Never fired on this machine: ' + (@($Report.NeverFired) -join ', '))
+    } else {
+        [void]$lines.Add('Every known mechanism has fired on this machine.')
+    }
+    return @($lines)
+}

@@ -20,6 +20,8 @@ param(
         'closeout-next',
         'closeout-done',
         'record-nudge',
+        'record-correction',
+        'record-rating',
         'refresh-lock'
     )]
     [string]$Transition,
@@ -60,6 +62,21 @@ param(
     [string]$ClaudeSession = '',
     [string]$ResumeFallback = '',
 
+    # record-correction: the three lines of a QUESTIONS.md correction record
+    # (protocol §3.6). Every ruling needs evidence; a ruling without it is refused.
+    [string]$Correction = '',
+
+    [ValidateSet('', 'user_right', 'agent_right', 'unresolved')]
+    [string]$Ruling = '',
+
+    [string]$Evidence = '',
+
+    # record-rating: the one closing question after done, written to RATING.md.
+    [ValidateRange(0, 5)]
+    [int]$Rating = 0,
+
+    [string]$Feedback = '',
+
     [switch]$WhatIfOnly
 )
 
@@ -67,9 +84,10 @@ param(
 Bounded bookkeeping for the driver. Each transition is a named, idempotent state
 edit with an explicit expected precondition. This script performs clerical work
 only: it never reads findings, never arbitrates a verdict, and never invokes a
-model. STATE.md is the only file it writes, and it is written last and
-atomically. Re-running an already-applied transition is a success, so a crash
-between a durable action and its checkpoint is recoverable.
+model. STATE.md is written last and atomically; the only other files it touches
+are the QUESTIONS.md append of a validated correction record and RATING.md for
+the closing rating. Re-running an already-applied transition is a success, so a
+crash between a durable action and its checkpoint is recoverable.
 #>
 
 Set-StrictMode -Version 2.0
@@ -276,11 +294,61 @@ function Get-Transition {
             if ($Attempt -ne $spent -and $Attempt -ne ($spent + 1)) { throw "The $NudgeClass budget records $spent spent, so -Attempt must be $($spent + 1) or a replay of $spent, not $Attempt." }
             return @{ From = @{}; To = [ordered]@{ $field = [string]$Attempt } }
         }
+        'record-correction' {
+            # The record is appended to QUESTIONS.md; STATE only refreshes its lock.
+            return @{ From = @{}; To = [ordered]@{} }
+        }
+        'record-rating' {
+            # Asked once after done; the lock stays released.
+            return @{ From = @{ phase = 'done' }; To = [ordered]@{ lock = '' } }
+        }
         'refresh-lock' {
             return @{ From = @{}; To = [ordered]@{} }
         }
     }
     throw "Unknown transition: $Name"
+}
+
+function Get-CorrectionRecord {
+    <#
+    Validates the three lines of a correction record (protocol §3.6) and renders
+    them. The driver settles by checking, so every ruling, including unresolved,
+    names the command or file that settled it; a ruling without evidence is
+    malformed and refused here rather than dropped later.
+    #>
+    param($Fields, [string]$Correction, [string]$Ruling, [string]$Evidence)
+
+    if ([string]::IsNullOrWhiteSpace($Correction)) { throw 'record-correction requires -Correction <the user''s words>.' }
+    if (-not $Ruling) { throw 'record-correction requires -Ruling user_right|agent_right|unresolved.' }
+    if ([string]::IsNullOrWhiteSpace($Evidence)) { throw "record-correction refuses a ruling without evidence: pass -Evidence <command or file that settled it>." }
+    foreach ($value in @($Correction, $Evidence)) {
+        if ($value -match '[\r\n]') { throw 'Correction and Evidence must each be a single line.' }
+    }
+    $phase = [string]$Fields['phase']
+    $round = if ($phase -eq 'build') { [string]$Fields['build_round'] } else { [string]$Fields['round'] }
+    if (-not $round) { $round = '0' }
+    return @(
+        ('Correction [{0}/{1}]: {2}' -f $phase, $round, $Correction.Trim()),
+        ('Ruling: {0}' -f $Ruling),
+        ('Evidence: {0}' -f $Evidence.Trim())
+    )
+}
+
+function Test-TextContainsRecord {
+    param([AllowEmptyString()][string]$Text, [string[]]$Record)
+    $normalized = ($Text.TrimStart([char]0xFEFF) -replace "`r`n", "`n")
+    return $normalized.Contains(($Record -join "`n"))
+}
+
+function Get-RatingContent {
+    param([int]$Rating, [string]$Feedback)
+
+    if ($Rating -lt 1) { throw 'record-rating requires -Rating 1..5; a skipped rating records nothing, so do not call this transition.' }
+    if ($Feedback -match '[\r\n]') { throw 'Feedback must be a single line.' }
+    if ($Rating -le 3 -and [string]::IsNullOrWhiteSpace($Feedback)) { throw 'A rating of three or lower carries one free-text -Feedback line.' }
+    $content = 'Rating: ' + $Rating + "`r`n"
+    if (-not [string]::IsNullOrWhiteSpace($Feedback)) { $content += 'Feedback: ' + $Feedback.Trim() + "`r`n" }
+    return $content
 }
 
 try {
@@ -337,6 +405,28 @@ try {
     }
     $stamp = [datetimeoffset]::Now.ToString('yyyy-MM-ddTHH:mm:sszzz')
 
+    # Record transitions are idempotent on the file they append, not on STATE.
+    $loopRoot = Join-Path $root '.loop'
+    $questionsPath = Join-Path $loopRoot 'QUESTIONS.md'
+    $ratingPath = Join-Path $loopRoot 'RATING.md'
+    $correctionRecord = @()
+    $ratingContent = ''
+    if ($Transition -eq 'record-correction') {
+        $correctionRecord = Get-CorrectionRecord -Fields $effective -Correction $Correction -Ruling $Ruling -Evidence $Evidence
+        $questionsText = if ([System.IO.File]::Exists($questionsPath)) { [System.IO.File]::ReadAllText($questionsPath) } else { '' }
+        $alreadyApplied = (Test-TextContainsRecord -Text $questionsText -Record $correctionRecord)
+    }
+    if ($Transition -eq 'record-rating') {
+        $ratingContent = Get-RatingContent -Rating $Rating -Feedback $Feedback
+        if ([System.IO.File]::Exists($ratingPath)) {
+            $existingRating = [System.IO.File]::ReadAllText($ratingPath).TrimStart([char]0xFEFF)
+            if (($existingRating -replace "`r`n", "`n") -cne ($ratingContent -replace "`r`n", "`n")) { throw 'RATING.md already records a different rating; the closing question is asked once.' }
+            $alreadyApplied = $true
+        } else {
+            $alreadyApplied = $false
+        }
+    }
+
     if (-not $alreadyApplied) {
         foreach ($key in @($plan.From.Keys)) {
             $expected = [string]$plan.From[$key]
@@ -358,7 +448,7 @@ try {
         }
         # A real advance starts a new step, and a new step gets fresh nudge budgets.
         # Replaying an applied transition must never refund a spent one.
-        if ($Transition -notin @('record-nudge', 'refresh-lock')) {
+        if ($Transition -notin @('record-nudge', 'record-correction', 'record-rating', 'refresh-lock')) {
             foreach ($field in @('format_nudged', 'mutation_nudged')) {
                 if ($fields.Contains($field) -and -not $updates.Contains($field)) { $updates[$field] = '' }
             }
@@ -393,7 +483,22 @@ try {
         foreach ($key in @($plan.Extra.Keys | Sort-Object)) { $result[$key] = $plan.Extra[$key] }
     }
 
-    if (-not $WhatIfOnly) { Write-StateLines -Path $statePath -State $state -Updates $updates }
+    if ($correctionRecord.Count -gt 0) { $result['record'] = $correctionRecord[0] }
+    if ($ratingContent) { $result['rating'] = [string]$Rating }
+
+    if (-not $WhatIfOnly) {
+        # Durable record first, STATE last, so a crash in between replays as applied.
+        if ($correctionRecord.Count -gt 0 -and -not $alreadyApplied) {
+            $questionsText = if ([System.IO.File]::Exists($questionsPath)) { [System.IO.File]::ReadAllText($questionsPath) } else { '' }
+            $separator = if ($questionsText.Length -eq 0) { '' } elseif ($questionsText.EndsWith("`n`n") -or $questionsText.EndsWith("`r`n`r`n")) { '' } elseif ($questionsText.EndsWith("`n")) { "`r`n" } else { "`r`n`r`n" }
+            Write-Utf8NoBomAtomic -Path $questionsPath -Content ($questionsText + $separator + ($correctionRecord -join "`r`n") + "`r`n")
+        }
+        if ($ratingContent -and -not $alreadyApplied) { Write-Utf8NoBomAtomic -Path $ratingPath -Content $ratingContent }
+        Write-StateLines -Path $statePath -State $state -Updates $updates
+        # Per-machine fired record (protocol §3.10): a replay counts as the mechanism
+        # running; only a real advance counts as it acting.
+        [void](Register-XloopFired -Mechanism ('transition:' + $Transition) -Acted:(-not $alreadyApplied))
+    }
     $result | ConvertTo-Json -Compress
     exit 0
 } catch {

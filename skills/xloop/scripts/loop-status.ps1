@@ -1,15 +1,52 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Project,
+    [string]$Project = '',
 
-    [switch]$AsJson
+    [switch]$AsJson,
+
+    # Per-machine fired record (protocol §3.10): which xloop mechanisms have ever
+    # run here. Needs no project.
+    [switch]$Fired,
+
+    # Closeout promotion list (protocol §3.6, §3.8): user_right corrections and
+    # overridden recommendations from QUESTIONS.md as [user-ruling], plus the
+    # closing rating from RATING.md as [rating]. Clerical: reads, never rules.
+    [switch]$Corrections,
+
+    # Recon's bounded lessons grep (protocol §5): the newest lesson notes under the
+    # wiki's raw/notes, excluding any note whose superseded-by: is set. The wiki
+    # root comes from STATE unless -Wiki overrides it.
+    [switch]$Lessons,
+
+    [string]$Wiki = '',
+
+    [ValidateRange(1, 50)]
+    [int]$Max = 5
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'loop-common.ps1')
+
+if ($Fired) {
+    try {
+        $report = Get-XloopFiredReport
+        if ($AsJson) {
+            [ordered]@{ path = $report.Path; mechanisms = @($report.Rows); never_fired = @($report.NeverFired) } | ConvertTo-Json -Depth 4 -Compress
+        } else {
+            foreach ($line in (Format-XloopFiredReport -Report $report)) { Write-Output $line }
+        }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+}
+if (-not $Project -and -not ($Lessons -and $Wiki)) {
+    [Console]::Error.WriteLine('loop-status.ps1 requires -Project <path>, -Fired for the per-machine fired record, or -Lessons -Wiki <root>.')
+    exit 1
+}
 
 function Read-State {
     param([string]$Path)
@@ -59,6 +96,67 @@ function Get-NextPacket {
         'escalated'   { return 'STATE.md, QUESTIONS.md, REVIEW-LOG.md' }
         'done'        { return 'STATE.md, REVIEW-LOG.md' }
         default       { return 'STATE.md' }
+    }
+}
+
+if ($Corrections) {
+    try {
+        $root = Get-LoopProjectRoot -Project $Project
+        $loopRoot = Join-Path $root '.loop'
+        $promotions = Get-LoopCorrectionPromotions -QuestionsPath (Join-Path $loopRoot 'QUESTIONS.md') -RatingPath (Join-Path $loopRoot 'RATING.md')
+        if ($AsJson) {
+            [ordered]@{ lessons = @($promotions.Lessons); dropped = @($promotions.Dropped); rating = $promotions.Rating } | ConvertTo-Json -Depth 4 -Compress
+        } else {
+            Write-Output ('Lesson promotions from QUESTIONS.md: {0}' -f @($promotions.Lessons).Count)
+            foreach ($lesson in $promotions.Lessons) {
+                if ($lesson['kind'] -eq 'correction') {
+                    Write-Output ('- {0} correction [{1}]: {2} | ruling: {3} | evidence: {4}' -f $lesson['tag'], $lesson['source'], $lesson['text'], $lesson['ruling'], $lesson['evidence'])
+                } else {
+                    Write-Output ('- {0} override: {1} | recommended: {2} | user: {3}' -f $lesson['tag'], $lesson['text'], $lesson['recommended'], $lesson['ruling'])
+                }
+            }
+            foreach ($drop in $promotions.Dropped) {
+                Write-Output ('- dropped ({0}): Correction [{1}]: {2}' -f $drop['reason'], $drop['source'], $drop['text'])
+            }
+            if ($null -ne $promotions.Rating) {
+                $feedback = if ($promotions.Rating['feedback']) { ' | feedback: ' + $promotions.Rating['feedback'] } else { '' }
+                Write-Output ('- [rating] {0}/5{1}' -f $promotions.Rating['rating'], $feedback)
+            } else {
+                Write-Output '- no closing rating recorded (skipped ratings write nothing)'
+            }
+        }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+}
+
+if ($Lessons) {
+    try {
+        $wikiRoot = $Wiki
+        if (-not $wikiRoot) {
+            if (-not $Project) { throw 'loop-status.ps1 -Lessons needs -Wiki <root> or -Project <path> whose STATE.md names the wiki.' }
+            $root = Get-LoopProjectRoot -Project $Project
+            $state = Read-State -Path (Join-Path (Join-Path $root '.loop') 'STATE.md')
+            $wikiRoot = if ($state.ContainsKey('wiki')) { $state['wiki'] } else { '' }
+            if (-not $wikiRoot) { throw 'STATE.md names no wiki root; recon is in no-wiki mode.' }
+        }
+        $wikiRoot = [System.IO.Path]::GetFullPath($wikiRoot)
+        $notes = @(Get-LoopRecentLessons -WikiRoot $wikiRoot -Max $Max)
+        if ($AsJson) {
+            [ordered]@{ wiki = $wikiRoot; lessons = @($notes | ForEach-Object { [ordered]@{ path = $_.Path; name = $_.Name; supersedes = $_.Supersedes } }) } | ConvertTo-Json -Depth 4 -Compress
+        } else {
+            Write-Output ('Newest lesson notes (superseded excluded): {0}' -f $notes.Count)
+            foreach ($note in $notes) {
+                $suffix = if ($note.Supersedes) { ' (supersedes ' + $note.Supersedes + ')' } else { '' }
+                Write-Output ('- ' + $note.Path + $suffix)
+            }
+        }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
     }
 }
 

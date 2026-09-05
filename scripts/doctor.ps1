@@ -42,6 +42,14 @@ $git = Get-Application -Name 'git.exe'
 $powershell = Get-Application -Name 'powershell.exe'
 $policyDiagnostic = Get-ExecutionPolicyDiagnostic
 
+# Per-machine fired record (protocol §3.10): an installed mechanism that has never
+# executed here is named before anyone relies on it. Never fails the doctor.
+$firedReport = $null
+$firedError = ''
+try { $firedReport = Get-XloopFiredReport } catch { $firedError = $_.Exception.Message }
+$firedRows = if ($null -ne $firedReport) { @($firedReport.Rows) } else { @() }
+$neverFired = if ($null -ne $firedReport) { @($firedReport.NeverFired) } else { @() }
+
 $checks = [ordered]@{
     powershell_5_1 = [ordered]@{
         ok = ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -eq 1)
@@ -79,6 +87,13 @@ $checks = [ordered]@{
         version = if ($claude) { (& $claude.Source --version 2>&1 | Out-String).Trim() } else { $null }
         flags = if ($claude) { Test-HelpTokens -Executable $claude.Source -Arguments @('--help') -Tokens @('--print', '--safe-mode', '--restricted', '--add-dir', '--tools', '--allowedTools', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--json-schema') } else { $null }
     }
+    fired = [ordered]@{
+        ok = $true
+        path = if ($null -ne $firedReport) { $firedReport.Path } else { $null }
+        error = $firedError
+        mechanisms = @($firedRows | ForEach-Object { [ordered]@{ mechanism = $_['mechanism']; first = $_['first']; last = $_['last']; ran = $_['count']; acted = $(if ($_['guard']) { $_['acted'] } else { $null }) } })
+        never_fired = $neverFired
+    }
 }
 
 
@@ -104,6 +119,10 @@ $ok = $checks.powershell_5_1.ok -and $checks.git.ok -and $checks.codex.ok -and $
     ok = $ok
     checks = $checks
 } | ConvertTo-Json -Depth 8
+
+if ($null -ne $firedReport) {
+    foreach ($line in (Format-XloopFiredReport -Report $firedReport)) { [Console]::Error.WriteLine($line) }
+}
 
 if ($ok) { exit 0 }
 exit 25
