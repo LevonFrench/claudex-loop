@@ -382,6 +382,95 @@ function Get-ReportProofValidation {
     return $result
 }
 
+function Get-ApprovalRequestValidation {
+    <#
+    Schema-over-prose detection (S10, protocol §6): a summoned agent has no human to
+    ask, so a final message that ends in a question mark or contains an approval
+    request is a format defect, exit 2 with nudge_class: format. Two clerical tests:
+      - the last non-blank line ends in `?`;
+      - any line that is not a finding header asks the reader for approval,
+        permission, confirmation, or a go-ahead, or asks a first-person question
+        (`may I`, `should we`, `do you want me to`) and ends in `?`.
+    A Scenario line or a claim that merely contains a question mark inside a finding
+    header is not an approval request and passes. The detector reads only.
+    #>
+    param([string]$Path)
+
+    $result = [pscustomobject]@{ Detected = $false; Kind = ''; Line = ''; Reason = '' }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.File]::Exists($Path)) { return $result }
+    $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+    $lines = @($text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) { return $result }
+
+    $last = $lines[$lines.Count - 1].Trim()
+    if ($last.EndsWith('?')) {
+        $result.Detected = $true
+        $result.Kind = 'question'
+        $result.Line = $last
+        $result.Reason = "The final message ends in a question mark; nobody is present to answer, so the artifact must end with its terminator: $last"
+        return $result
+    }
+
+    $approvalPhrase = '(?i)\b(?:please (?:approve|confirm|authorize|authorise|grant|advise)|(?:need|needs|require|requires|requesting|request|awaiting|waiting for|wait for) (?:your |the user''s |user |human |explicit )?(?:approval|permission|confirmation|authorization|authorisation|go-ahead|sign-off)|(?:permission|approval|authorization|authorisation) to (?:proceed|continue|write|edit|run|commit|modify)|let me know (?:if|whether|when|how)|(?:may|can|could|should|shall) (?:i|we) (?:proceed|continue|go ahead)|(?:do|would) you (?:want|like) (?:me|us) to)\b'
+    $firstPersonQuestion = '(?i)\b(?:may|should|shall|can|could|would|will|do|did)\s+(?:i|we)\b[^\r\n]*\?\s*$'
+    $secondPersonQuestion = '(?i)\b(?:would|do|did|could|can|will|shall) you\b[^\r\n]*\?\s*$'
+    foreach ($raw in $lines) {
+        $line = $raw.Trim()
+        # Finding headers and scenarios are schema, not conversation.
+        if ($line -match '^\[(?:F|B)\d') { continue }
+        if ($line -match '^(?:Scenario|PROOF-STATIC|PROOF-REAL|VERDICT|RESULT):') { continue }
+        if ($line -match $approvalPhrase) {
+            $result.Detected = $true
+            $result.Kind = 'approval-request'
+            $result.Line = $line
+            $result.Reason = "The final message contains an approval request; nobody is present to grant it, so the artifact must not ask: $line"
+            return $result
+        }
+        if ($line -match $firstPersonQuestion -or $line -match $secondPersonQuestion) {
+            $result.Detected = $true
+            $result.Kind = 'question'
+            $result.Line = $line
+            $result.Reason = "The final message asks the reader a question; nobody is present to answer, so the artifact must not ask: $line"
+            return $result
+        }
+    }
+    return $result
+}
+
+function Get-ReportCommitValidation {
+    <#
+    Schema-over-prose detection (S10, protocol §6): a builder report produced by a
+    write-mode summon claims work that must exist as commits. When the summon ran
+    in write mode, the output is a build or fix report (b<N>-report.md), and
+    `git log <pin>..HEAD` is empty, the report is a format defect, exit 2 with
+    nudge_class: format. The pin is STATE pinned_sha, or base_sha before the first
+    pin. Without a readable pin or a Git repository nothing can be checked and the
+    detection is not applicable. The detector reads only.
+    #>
+    param([string]$OutputPath, [string]$LoopRoot, [string]$Root, [string]$Sandbox)
+
+    $result = [pscustomobject]@{ Applicable = $false; Valid = $true; Reason = ''; From = ''; Commits = -1 }
+    if ($Sandbox -ne 'write') { return $result }
+    if ((Split-Path -Leaf $OutputPath) -notmatch '^b\d+-report\.md$') { return $result }
+    $state = Read-LoopStateFields -Path (Join-Path $LoopRoot 'STATE.md')
+    if ($null -eq $state) { return $result }
+    $from = Get-LoopStateValue -Fields $state -Key 'pinned_sha'
+    if (-not $from) { $from = Get-LoopStateValue -Fields $state -Key 'base_sha' }
+    if (-not $from -or $from -notmatch '^[0-9a-fA-F]{7,40}$') { return $result }
+    $count = $null
+    try { $count = Invoke-LoopGitText -Root $Root -Arguments @('rev-list', '--count', ($from + '..HEAD')) } catch { return $result }
+    if ($null -eq $count -or $count.ExitCode -ne 0 -or $count.Text -notmatch '^\d+$') { return $result }
+    $result.Applicable = $true
+    $result.From = $from
+    $result.Commits = [int]$count.Text
+    if ($result.Commits -eq 0) {
+        $result.Valid = $false
+        $shortFrom = $from.Substring(0, [Math]::Min(7, $from.Length))
+        $result.Reason = "A write-mode report must describe new commits, but git log $shortFrom..HEAD is empty: the round committed nothing."
+    }
+    return $result
+}
+
 function Invoke-LoopGitText {
     <#
     Bounded clerical Git call for the bookkeeping scripts: returns the exit code and
@@ -838,7 +927,11 @@ function New-PacketGuard {
         if ($full.Equals($ledgerPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'The usage ledger is written only by the wrapper and cannot be declared append-only.' }
         if ($protected.Contains($full)) { throw "Packet evidence cannot also be declared append-only: $full" }
         if ($output -and $full.Equals($output, [System.StringComparison]::OrdinalIgnoreCase)) { throw "The summon output path cannot also be declared append-only: $full" }
-        $bytes = if ([System.IO.File]::Exists($full)) { [System.IO.File]::ReadAllBytes($full) } else { New-Object byte[] 0 }
+        # Typed on purpose: an existing but empty file (the scaffolded wiki inbox at
+        # closeout) reads as a zero-length array, which an untyped `if` expression
+        # would unroll to $null and the byte-prefix comparison would then reject.
+        [byte[]]$bytes = New-Object byte[] 0
+        if ([System.IO.File]::Exists($full)) { [byte[]]$bytes = [System.IO.File]::ReadAllBytes($full) }
         $appendOnly[$full] = $bytes
     }
     # Only the wrapper writes counts to the ledger; an agent rewriting or creating it

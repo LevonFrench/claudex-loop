@@ -313,6 +313,18 @@ try {
     if ($validation.Valid -and -not $proofValidation.Valid) {
         $validation = [pscustomobject]@{ Valid = $false; Terminator = $validation.Terminator; Reason = $proofValidation.Reason }
     }
+    # Schema-over-prose detections (§6): a final message that asks a question or
+    # requests approval, and a write-mode report with zero new commits since the pin.
+    $approval = Get-ApprovalRequestValidation -Path $outputPath
+    $commitValidation = Get-ReportCommitValidation -OutputPath $outputPath -LoopRoot $loopRoot -Root $root -Sandbox $Sandbox
+    $detections = @()
+    if ($approval.Detected) { $detections += $approval.Kind }
+    if (-not $commitValidation.Valid) { $detections += 'zero-commits' }
+    if ($approval.Detected) {
+        $validation = [pscustomobject]@{ Valid = $false; Terminator = $validation.Terminator; Reason = $approval.Reason }
+    } elseif ($validation.Valid -and -not $commitValidation.Valid) {
+        $validation = [pscustomobject]@{ Valid = $false; Terminator = $validation.Terminator; Reason = $commitValidation.Reason }
+    }
     $mutationCount = @($violations).Count
     $nudgeClass = ''
     if (-not $validation.Valid) { $nudgeClass = 'format' } elseif ($mutationCount -gt 0) { $nudgeClass = 'mutation' }
@@ -334,6 +346,8 @@ try {
         validation_error = $validation.Reason
         proofs = $proofValidation.Proofs
         proof_real_open = $proofValidation.RealOpen
+        detections = @($detections)
+        commits_since_pin = $commitValidation.Commits
         provider_probe = $providerProbe
         soft_timeout_sec = $softCap
         mutations = @($violations)

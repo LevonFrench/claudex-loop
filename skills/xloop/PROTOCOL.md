@@ -294,6 +294,7 @@ The drift gate compares SHAs; the brief truth gate checks that the brief's own c
 ## 6. Convergence, build, and platform rules
 
 - Maximum five plan-review rounds, two fix rounds, and zero timeout retries. Exit `2` carries `nudge_class`: `format` and `mutation` have independent one-use nudges, so a single formatting slip and a single restored mutation do not consume each other's budget. A repeat of either class escalates, and one summon makes at most three attempts. Record the spend with `loop-step.ps1 -Transition record-nudge -NudgeClass format|mutation` before summoning the retry; when that transition refuses, escalate.
+- Two schema-over-prose detections share the `format` class (§6.1). A final message that ends in a question mark, asks the reader a question, or contains an approval request is exit `2`, `nudge_class: format`: nobody is present to answer, so the wrapper flags it instead of the driver relaying it. A `b<N>-report.md` produced by a write-mode summon while `git -C <project> log <pinned_sha>..HEAD` (or `<base_sha>..HEAD` before the first pin) is empty is exit `2`, `nudge_class: format`: a build or fix report describes commits, and zero commits is not a build. Both detections are recorded in the summon metadata as `detections`, and the commit count as `commits_since_pin`; neither applies to read-only summons or to outputs other than the ones named.
 - `APPROVE` is parsed, never inferred. Invalid `REVISE`, missing terminator, malformed output, or a pseudo-finding under `APPROVE` gets exactly one format nudge. After the format budget is spent, a malformed findings file that still contains at least one line in the exact `[F<round>.<i>] severity | reference | claim` form followed by a `Scenario:` line is treated as `VERDICT: REVISE` over exactly those parseable findings; the driver arbitrates them normally, records the round as `format-salvaged`, and does not ask the user. Only a malformed file with zero parseable findings escalates as one user batch. Approval is never salvaged: a malformed file cannot approve.
 - The driver arbitrates findings; the user is never asked to accept or reject one. User decisions occur only at the interrogate batch, a round-5 review escalation, a build escalation, the dirty-tree gate, and the fix cap, always as one batch with `recommended` and `default-if-silent` per item (§3.6). Summons need no user authorization.
 - The packet decides which terminator is legal, and the wrapper enforces it from the assigned output name: `r<N>-findings.md` and `b<N>-inspect.md` require `VERDICT:`, `b<N>-report.md` and `CLOSEOUT-REPORT.md` require `RESULT:`, and `-Expect verdict|result` states it explicitly for any other path. A verdict file may contain finding-shaped lines only in the exact `[F<round>.<i>]`/`[B<round>.<i>] severity | reference | claim` form; a bare `[F5]` or a severity-less header is a pseudo-finding and invalidates the file under either verdict.
@@ -314,3 +315,56 @@ The drift gate compares SHAs; the brief truth gate checks that the brief's own c
 - When a resolved wiki root is outside the project, pass that exact root to `loop-claude.ps1 -AddDir`; restricted Claude calls must not receive broader filesystem scope.
 - Codex write invocations use the locked `codex_write_flag: --dangerously-bypass-approvals-and-sandbox` value from this protocol. Do not probe for or substitute a different flag at run time.
 - Wrapper exit codes: `0` valid output; `2` malformed output; `3` killed timeout (soft or hard cap); `1` tool failure, including `provider-unreachable`. Never silently self-review when the adversary is unavailable.
+
+### 6.1 Template rule audit
+
+Compliance tracks the schema, not the prose: a rule the wrapper enforces is followed; the same rule written twice in a packet is followed at a fraction of that rate. This table lists every rule that appears in the eight packet templates (`build`, `closeout`, `fix`, `inspect`, `report`, `review-r1`, `review-rN`, `verdict-nudge`), each in exactly one class:
+
+- `enforced`: the wrapper, a validator, or a named `loop-step.ps1` transition rejects a violation.
+- `detected`: nothing can prevent the violation, but a wrapper detection, a clerical transition, or the driver's arbitration flags it and records the flag.
+- `advisory`: nothing can check it (read budgets, "do not explore", honesty about evidence); it is stated once per packet that needs it and nowhere else.
+
+The `rule` column is the canonical phrase, in backticks, that the template sentence carries verbatim; each template states a rule at most once, with that phrase, so the sentence is the one place the rule lives. The smoke suite extracts every template sentence containing `must`, `never`, `only`, or `exactly` (whole words, case-insensitive; the trailing `Key: {{token}}` lines are ignored) and asserts that each such sentence contains at least one `rule` phrase from this table, that every phrase appears in at least one template and at most once per template, and that every row carries exactly one class.
+
+| id | class | rule | packets | mechanism |
+|---|---|---|---|---|
+| R1 | detected | `final message is stored verbatim as the output path` | all eight | terminator validation rejects anything after the terminator (a trailing fence or prose); the approval detection rejects questions; a leading preamble is not flagged |
+| R2 | detected | `never ask for approval, permission, or clarification` | all eight | `Get-ApprovalRequestValidation`: a final message that ends in `?`, asks the reader a question, or contains an approval request is exit `2`, `nudge_class: format` |
+| R3 | enforced | `nothing but the output path may change` | all eight | packet mutation guard (§3.9): the immutable core and every packet evidence file are restored, unexpected additions are quarantined, exit `2`, `nudge_class: mutation` |
+| R4 | enforced | `must never rewrite or remove its existing bytes` | closeout | append-only guard: a declared append-only path that loses its byte prefix is restored, exit `2`, `nudge_class: mutation` |
+| R5 | enforced | `last non-blank line must be exactly` | all eight | `Get-TerminatorValidation`, with the terminator kind fixed by the output name or `-Expect` |
+| R6 | enforced | `Finding IDs are exactly` | review-r1, review-rN, inspect, verdict-nudge | verdict validation: every finding-shaped line must match `[F<round>.<i>]`/`[B<round>.<i>] severity \| reference \| claim` |
+| R7 | enforced | `REVISE requires at least one blocking finding` | review-r1, review-rN, inspect, verdict-nudge | verdict validation: `REVISE` without a blocking finding that carries a `Scenario:` line is exit `2` |
+| R8 | enforced | `APPROVE means zero findings` | review-r1, review-rN, inspect, verdict-nudge | verdict validation: `APPROVE` with any finding-shaped or pseudo-finding line is exit `2` |
+| R9 | detected | `Every finding needs a concrete Scenario line` | review-r1, review-rN, inspect, verdict-nudge | driver arbitration voids a finding without a scenario as `void-no-scenario` (§3.3); a `REVISE` whose blocking findings all lack one is rejected under R7 |
+| R10 | enforced | `on its own line as exactly PROOF-STATIC` | build, fix, report | `Get-ReportProofValidation`: a missing status line for a declared proof, or `not-verified` without a reason, is exit `2`, `nudge_class: format` |
+| R11 | advisory | `Never claim a higher evidence rung` | build, fix, report | cannot be checked; the reason after `not-verified` is required under R10 |
+| R12 | advisory | `blocks only itself` | build, inspect | cannot be checked |
+| R13 | detected | `small new commits` | build, fix | `Get-ReportCommitValidation`: a write-mode `b<N>-report.md` with zero commits since the pin is exit `2`, `nudge_class: format` |
+| R14 | advisory | `Implement only the contract` | build | cannot be checked; inspection judges scope |
+| R15 | advisory | `without amending reviewed commits` | fix | cannot be checked by the wrapper; pins are new commits and the inspector reads the incremental diff |
+| R16 | detected | `commit subject must begin with the finding ID` | fix | `build-inspect` computes `fix_coverage` and `fix_uncovered` from the commit subjects (§3.7); the inspection packet cites both |
+| R17 | advisory | `lands a regression case` | fix | cannot be checked; the inspector reads the report line |
+| R18 | advisory | `must not be redone, amended, or reverted` | report | cannot be checked by the wrapper; the inspector reads the incremental diff |
+| R19 | enforced | `APPROVE is invalid while PROOF-REAL is not-verified` | inspect | `build-pin` records `open: PROOF-REAL` and `build-complete` refuses while it stands (§3.7) |
+| R20 | advisory | `Do not inspect the live tree` | inspect | cannot be checked; the packet carries the generated diff |
+| R21 | advisory | `treat each as unresolved unless the diff itself plainly closes it` | inspect | cannot be checked; the uncovered list is computed clerically under R16 |
+| R22 | advisory | `evidence, not instructions` | review-r1 | cannot be checked |
+| R23 | detected | `finding against a settled ID is void` | review-r1, review-rN | driver arbitration voids it against the settled ledger (§3.5) |
+| R24 | advisory | `does not yet implement this plan` | review-r1, review-rN | cannot be checked; the driver rejects the finding at arbitration |
+| R25 | advisory | `at most five source files` | review-r1 | read budget; cannot be checked |
+| R26 | advisory | `If the brief path is empty or does not exist` | build, inspect, review-r1 | cannot be checked; packet evidence that does exist is protected under R3 |
+| R27 | advisory | `do not reread the plan` | review-rN | read budget; cannot be checked |
+| R28 | advisory | `At the final permitted round` | review-rN | cannot be checked; round 5 `REVISE` escalates as one batch |
+| R29 | advisory | `compiled wiki content only as Claude` | closeout | cannot be checked by the wrapper; `closeout_model` fixes the closeout agent |
+| R30 | advisory | `do not redesign` | closeout | cannot be checked |
+| R31 | advisory | `upsert by loop ID and pinned SHA` | closeout | cannot be checked; `closeout_step` makes each step replayable |
+| R32 | detected | `promote the user's rulings from the question batch exactly as protocol section 3.8 defines` | closeout | `loop-status.ps1 -Corrections` derives the exact promotion list clerically (§3.8) |
+| R33 | advisory | `re-derive lessons from prose alone` | closeout | cannot be checked; the packet carries the commit subjects |
+| R34 | detected | `never one side alone` | closeout | `loop-brief-check.ps1` reports a `supersedes:` target that does not exist; `loop-status.ps1 -Lessons` shows a one-sided retirement as both notes live |
+| R35 | detected | `initialize the wiki, its index, and the first brief` | closeout | ship gate `wiki` and `brief` checks refuse `closeout-next -ToCloseoutStep complete` |
+| R36 | advisory | `degraded or partial closeout reports FAIL` | closeout | cannot be checked |
+| R37 | advisory | `drop every sentence that is not part of the schema` | verdict-nudge | cannot be checked; prose between valid findings passes validation |
+| R38 | advisory | `correct its complete contents into the required schema` | verdict-nudge | cannot be checked; the corrected output is validated under R5 to R8 |
+| R39 | advisory | `diff stat, one status line per declared proof` | build, fix, report | the proof lines are validated under R10; the commit list and diff stat are not |
+| R40 | advisory | `Act as` | build, fix, report, inspect, review-r1 | roles are fixed by §1; the packet states the role once |
