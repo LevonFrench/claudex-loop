@@ -13,6 +13,7 @@ param(
         'build-pin',
         'build-inspect',
         'build-fix',
+        'build-report-only',
         'build-complete',
         'build-escalate',
         'build-to-closeout',
@@ -49,6 +50,8 @@ param(
     [string]$BaseSha = '',
     [string]$BriefVerified = '',
     [string]$ProofCmd = '',
+    # The real-path proof (protocol §3.7): one command, or `none - <reason>`.
+    [string]$ProofReal = '',
     [string]$Open = '',
     [string]$Settled = '',
     [string]$Wiki = '',
@@ -136,7 +139,7 @@ function Get-Transition {
     evaluated against the state the transition actually produces, so recording a pin
     and moving to inspection is one atomic step rather than two ordered ones.
     #>
-    param([string]$Name, $Fields, [string]$Agent, [int]$ToRound, [int]$ToBuildRound, [string]$ToCloseoutStep, [string]$NudgeClass, [int]$Attempt)
+    param([string]$Name, $Fields, [string]$Agent, [int]$ToRound, [int]$ToBuildRound, [string]$ToCloseoutStep, [string]$NudgeClass, [int]$Attempt, [string]$Root = '')
 
     $round = [int]$Fields['round']
     $buildRound = [int]$Fields['build_round']
@@ -160,17 +163,76 @@ function Get-Transition {
         }
         'review-approve' {
             if (-not $Fields['proof_cmd']) { throw 'Cannot approve into build without a configured proof_cmd.' }
+            if ($Fields.Contains('proof_real') -and -not $Fields['proof_real']) { throw 'Cannot approve into build without a recorded proof_real: pass -ProofReal <command> or -ProofReal "none - <reason>" (protocol section 3.7).' }
             return @{ From = @{ phase = 'review' }; To = [ordered]@{ phase = 'build'; build_round = '1'; build_step = 'summon'; verdict = 'APPROVE'; open = '' } }
         }
         'review-escalate' {
             return @{ From = @{ phase = 'review' }; To = [ordered]@{ phase = 'escalated'; escalation_kind = 'review' } }
         }
         'build-pin' {
-            return @{ From = @{ phase = 'build' }; To = [ordered]@{ phase = 'build'; build_step = 'pin' } }
+            # Clerical evidence-rung bookkeeping (§3.7): when the contract declares a
+            # real proof command and this round's report leaves it not-verified, the
+            # marker PROOF-REAL joins `open` and blocks completion; a later report that
+            # passes it clears the marker. Finding IDs in `open` are untouched.
+            $to = [ordered]@{ phase = 'build'; build_step = 'pin' }
+            $reportPath = Join-Path $Root ('.loop\build\b' + $buildRound + '-report.md')
+            if ($Root -and [System.IO.File]::Exists($reportPath)) {
+                $proof = Get-ReportProofValidation -OutputPath $reportPath -LoopRoot (Join-Path $Root '.loop')
+                if ($proof.Applicable) {
+                    $ids = @(@($Fields['open'] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'PROOF-REAL' })
+                    if ($proof.RealOpen) { $ids += 'PROOF-REAL' }
+                    $to['open'] = ($ids -join ',')
+                }
+            }
+            return @{ From = @{ phase = 'build' }; To = $to }
         }
         'build-inspect' {
             if (-not $Fields['pinned_sha']) { throw 'Cannot inspect before pinned_sha is recorded.' }
-            return @{ From = @{ phase = 'build'; build_step = 'pin' }; To = [ordered]@{ phase = 'build'; build_step = 'inspect' } }
+            $to = [ordered]@{ phase = 'build'; build_step = 'inspect' }
+            # Fix coverage (§3.7): commit subjects in the pinned range, matched
+            # clerically against the open finding IDs. No open IDs means nothing to
+            # cover; an unreadable range is refused rather than reported as covered.
+            $extra = @{}
+            if ($Fields.Contains('fix_coverage') -and $Fields.Contains('fix_uncovered')) {
+                $openIds = @(@($Fields['open'] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'PROOF-REAL' })
+                $covered = @()
+                $uncovered = @()
+                if ($openIds.Count -gt 0) {
+                    $from = if ($Fields['previous_pinned_sha']) { $Fields['previous_pinned_sha'] } else { $Fields['base_sha'] }
+                    if (-not $from) { throw 'Cannot compute fix coverage: neither previous_pinned_sha nor base_sha is recorded.' }
+                    $log = Invoke-LoopGitText -Root $Root -Arguments @('log', '--format=%s', ($from + '..' + $Fields['pinned_sha']))
+                    if ($log.ExitCode -ne 0) { throw "Cannot compute fix coverage from git log ${from}..$($Fields['pinned_sha']): $($log.Text)" }
+                    $coverage = Get-FixCoverage -OpenId $openIds -Subject @($log.Text -split "`r?`n")
+                    $covered = @($coverage.Covered)
+                    $uncovered = @($coverage.Uncovered)
+                }
+                $to['fix_coverage'] = ($covered -join ',')
+                $to['fix_uncovered'] = ($uncovered -join ',')
+                $extra['fix_coverage'] = $to['fix_coverage']
+                $extra['fix_uncovered'] = $to['fix_uncovered']
+            }
+            return @{ From = @{ phase = 'build'; build_step = 'pin' }; To = $to; Extra = $extra }
+        }
+        'build-report-only' {
+            # Recovery after a write-mode timeout (§4, S12): the commits exist, only the
+            # report is missing. Allowed only when this round's summon metadata records
+            # exit 3 in write mode and the pinned range to HEAD is non-empty.
+            $step = $Fields['build_step']
+            if ($step -notin @('summon', 'fix', 'report-only')) { throw "build-report-only recovers a timed-out write summon at build_step summon|fix, not '$step'." }
+            $metadataPath = Join-Path $Root ('.loop\build\b' + $buildRound + '-report.md.meta.json')
+            if (-not [System.IO.File]::Exists($metadataPath)) { throw "No summon metadata for build round ${buildRound}: nothing to recover." }
+            $metadata = $null
+            try { $metadata = [System.IO.File]::ReadAllText($metadataPath).TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { throw "Unreadable summon metadata: $metadataPath" }
+            $exitCode = if ($metadata.PSObject.Properties.Name -contains 'exit_code') { [int]$metadata.exit_code } else { -1 }
+            $sandbox = if ($metadata.PSObject.Properties.Name -contains 'sandbox') { [string]$metadata.sandbox } else { '' }
+            if ($exitCode -ne 3 -or $sandbox -ne 'write') { throw "build-report-only requires the previous summon to have exited 3 in write mode; metadata records exit $exitCode in '$sandbox' mode." }
+            $from = if ($Fields['pinned_sha']) { $Fields['pinned_sha'] } else { $Fields['base_sha'] }
+            if (-not $from) { throw 'Cannot recover a report: neither pinned_sha nor base_sha is recorded.' }
+            $log = Invoke-LoopGitText -Root $Root -Arguments @('log', '--format=%h %s', ($from + '..HEAD'))
+            if ($log.ExitCode -ne 0) { throw "Cannot read commits after ${from}: $($log.Text)" }
+            $commits = @($log.Text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($commits.Count -eq 0) { throw "No commits after ${from}: run a fresh build or fix summon instead of a report-only recovery." }
+            return @{ From = @{ phase = 'build' }; To = [ordered]@{ phase = 'build'; build_step = 'report-only' }; Extra = @{ commit_range = ($from + '..HEAD'); commit_count = $commits.Count } }
         }
         'build-fix' {
             if ($ToBuildRound -lt 1) { throw 'build-fix requires -ToBuildRound <n>: the fix round you are about to run.' }
@@ -179,6 +241,8 @@ function Get-Transition {
             return @{ From = @{ phase = 'build'; build_step = 'inspect' }; To = [ordered]@{ phase = 'build'; build_step = 'fix'; build_round = [string]$ToBuildRound } }
         }
         'build-complete' {
+            $openIds = @(@($Fields['open'] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($openIds -contains 'PROOF-REAL') { throw 'Cannot complete the build while open: PROOF-REAL stands. The contract declares a real proof command that no report has verified; run it (or a report-only round) before APPROVE counts.' }
             return @{ From = @{ phase = 'build'; build_step = 'inspect' }; To = [ordered]@{ phase = 'build'; build_step = 'complete' } }
         }
         'build-escalate' {
@@ -234,6 +298,7 @@ try {
         base_sha            = $BaseSha
         brief_verified      = $BriefVerified
         proof_cmd           = $ProofCmd
+        proof_real          = $ProofReal
         open                = $Open
         settled             = $Settled
         wiki                = $Wiki
@@ -248,6 +313,8 @@ try {
         if ($text -match '[\r\n]') { throw "Field values must be single-line: $key" }
         if (-not $fields.Contains($key)) { throw "STATE.md has no field named $key" }
         if ($key -match 'sha$' -and $text -notmatch '^[0-9a-fA-F]{7,40}$') { throw "Invalid SHA for ${key}: $text" }
+        # An exemption is a recorded decision, not a silence: `none` needs its reason.
+        if ($key -eq 'proof_real' -and $text -match '(?i)^none\b' -and $text -notmatch '(?i)^none\s*(?:\u2014|--|-|:)\s*\S') { throw "proof_real 'none' must carry a reason: none - <reason>" }
         $overrides[$key] = $text
     }
 
@@ -258,7 +325,7 @@ try {
     foreach ($key in @($fields.Keys)) { $effective[$key] = $fields[$key] }
     foreach ($key in @($overrides.Keys)) { $effective[$key] = $overrides[$key] }
 
-    $plan = Get-Transition -Name $Transition -Fields $effective -Agent $Agent -ToRound $ToRound -ToBuildRound $ToBuildRound -ToCloseoutStep $ToCloseoutStep -NudgeClass $NudgeClass -Attempt $Attempt
+    $plan = Get-Transition -Name $Transition -Fields $effective -Agent $Agent -ToRound $ToRound -ToBuildRound $ToBuildRound -ToCloseoutStep $ToCloseoutStep -NudgeClass $NudgeClass -Attempt $Attempt -Root $root
     $updates = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
     foreach ($key in @($plan.To.Keys)) { $updates[$key] = $plan.To[$key] }
     foreach ($key in @($overrides.Keys)) { $updates[$key] = $overrides[$key] }
@@ -318,6 +385,12 @@ try {
         format_nudged = [string]$(if ($updates.Contains('format_nudged')) { $updates['format_nudged'] } elseif ($fields.Contains('format_nudged')) { $fields['format_nudged'] } else { '' })
         mutation_nudged = [string]$(if ($updates.Contains('mutation_nudged')) { $updates['mutation_nudged'] } elseif ($fields.Contains('mutation_nudged')) { $fields['mutation_nudged'] } else { '' })
         ship_check = [string]$(if ($updates.Contains('ship_check')) { $updates['ship_check'] } elseif ($fields.Contains('ship_check')) { $fields['ship_check'] } else { '' })
+        open = [string]$(if ($updates.Contains('open')) { $updates['open'] } else { $fields['open'] })
+    }
+    # Derived clerical values (fix coverage, a report-only commit range) ride along
+    # in the result so the driver never recomputes them from memory.
+    if ($plan.ContainsKey('Extra')) {
+        foreach ($key in @($plan.Extra.Keys | Sort-Object)) { $result[$key] = $plan.Extra[$key] }
     }
 
     if (-not $WhatIfOnly) { Write-StateLines -Path $statePath -State $state -Updates $updates }

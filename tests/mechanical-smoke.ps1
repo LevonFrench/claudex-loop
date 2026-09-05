@@ -129,6 +129,10 @@ try {
 
     $savedPath = $env:PATH
     $env:PATH = $mockBin + [IO.Path]::PathSeparator + $env:PATH
+    # Mock providers have no network endpoint: the reachability pre-flight is
+    # disabled suite-wide and exercised explicitly in the loop B region below.
+    $env:XLOOP_PROBE_ENDPOINT_CLAUDE = 'none'
+    $env:XLOOP_PROBE_ENDPOINT_CODEX = 'none'
     try {
         $claudeHome = Join-Path $tempRoot 'claude skills Ω'
         $codexHome = Join-Path $tempRoot 'codex skills [test]'
@@ -497,7 +501,7 @@ try {
         # Every packet template states the provider-neutral output contract so a
         # summoned agent without write tools still produces a valid artifact.
         $templateFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'skills\xloop\templates') -Filter '*.txt' -File)
-        Assert-True -Condition ($templateFiles.Count -ge 7) -Message 'Expected at least seven packet templates.'
+        Assert-True -Condition ($templateFiles.Count -eq 8) -Message "Expected exactly eight packet templates (build, closeout, fix, inspect, report, review-r1, review-rN, verdict-nudge), found $($templateFiles.Count)."
         foreach ($templateFile in $templateFiles) {
             $templateText = [IO.File]::ReadAllText($templateFile.FullName)
             Assert-True -Condition ($templateText -match 'final message is stored verbatim as the output path') -Message "Template $($templateFile.Name) does not state the final-message output contract."
@@ -811,8 +815,325 @@ try {
         $env:XLOOP_MOCK_MODE = 'timeout'
         $timeout = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\timeout.md', '-TimeoutSec', '1')
         Assert-True -Condition ($timeout.ExitCode -eq 3) -Message "Timeout returned $($timeout.ExitCode), expected 3: $($timeout.Output)"
+
+        # ---- Scope loop B (S3, S5, S11, S12) ----
+        $utf8NoBom = New-Object Text.UTF8Encoding($false)
+
+        # S3: evidence rungs. State records both proofs, `none` needs its reason,
+        # approval into build needs both, and a report answers every proof its
+        # contract declares as a command.
+        $rungProject = Join-Path $tempRoot 'rung project'
+        [IO.Directory]::CreateDirectory($rungProject) | Out-Null
+        $rungInit = Invoke-ChildCommand -Command ($isolateClaudeOnly + "& '$initScript' -Project '$rungProject' -Author 'claude' -LoopName 'rung-smoke'; exit `$LASTEXITCODE")
+        Assert-True -Condition ($rungInit.ExitCode -eq 0) -Message "Rung-project initialization failed: $($rungInit.Output)"
+        $rungStatePath = Join-Path $rungProject '.loop\STATE.md'
+        $rungStateText = [IO.File]::ReadAllText($rungStatePath)
+        foreach ($field in @('proof_real:', 'fix_coverage:', 'fix_uncovered:')) {
+            Assert-True -Condition ($rungStateText -match ('(?m)^' + [regex]::Escape($field) + '\s*$')) -Message "Initialization did not scaffold the $field field."
+        }
+        $rungStateText = $rungStateText -replace '(?m)^phase: recon(?=\r?$)', 'phase: review' -replace '(?m)^proof_cmd:(?=\r?$)', 'proof_cmd: npm test'
+        [IO.File]::WriteAllText($rungStatePath, $rungStateText, $utf8NoBom)
+        $approveNoReal = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'review-approve')
+        Assert-True -Condition ($approveNoReal.ExitCode -eq 1) -Message 'Approval into build was allowed without a recorded real proof.'
+        $bareNone = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'refresh-lock', '-ProofReal', 'none')
+        Assert-True -Condition ($bareNone.ExitCode -eq 1) -Message 'A bare proof_real none was recorded without its reason.'
+        $reasonedNone = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'refresh-lock', '-ProofReal', 'none - pure library change with no user path')
+        Assert-True -Condition ($reasonedNone.ExitCode -eq 0) -Message "A reasoned proof_real none was refused: $($reasonedNone.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($rungStatePath) -match '(?m)^proof_real: none - pure library change with no user path\s*$') -Message 'proof_real was not recorded in STATE.md.'
+        $approveWithReal = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'review-approve')
+        Assert-True -Condition ($approveWithReal.ExitCode -eq 0) -Message "Approval into build failed with both proofs recorded: $($approveWithReal.Output)"
+
+        $rungPrompt = Join-Path $rungProject '.loop\tmp\build packet.txt'
+        [IO.File]::WriteAllText($rungPrompt, 'build packet: read the contract and report every declared proof.', $utf8NoBom)
+        $contractPath = Join-Path $rungProject '.loop\build\CONTRACT.md'
+        $contractBoth = "GOAL: smoke`r`nSPEC: .loop/PLAN.md`r`nKEY PATHS: src`r`nCONSTRAINTS: none`r`nPROOF-STATIC: npm test`r`nPROOF-REAL: npm run smoke:cli`r`nOUTPUT: small commits; build/b1-report.md`r`n"
+        $contractNone = "GOAL: smoke`r`nSPEC: .loop/PLAN.md`r`nKEY PATHS: src`r`nCONSTRAINTS: none`r`nPROOF-STATIC: npm test`r`nPROOF-REAL: none " + [char]0x2014 + " pure library change with no user path`r`nOUTPUT: small commits; build/b1-report.md`r`n"
+        [IO.File]::WriteAllText($contractPath, $contractBoth, $utf8NoBom)
+        $env:XLOOP_MOCK_MODE = 'result-pass'
+        $missingProof = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $rungProject, '-PromptFile', '.loop\tmp\build packet.txt', '-OutFile', '.loop\build\b1-report.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($missingProof.ExitCode -eq 2) -Message "A report missing its declared proof lines returned $($missingProof.ExitCode), expected 2: $($missingProof.Output)"
+        $missingProofMeta = [IO.File]::ReadAllText((Join-Path $rungProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+        Assert-True -Condition ($missingProofMeta.nudge_class -eq 'format' -and $missingProofMeta.validation_error -match 'PROOF-STATIC') -Message "A missing proof line was not classified as a format defect: $($missingProofMeta.validation_error)"
+
+        [IO.File]::WriteAllText($contractPath, $contractNone, $utf8NoBom)
+        $env:XLOOP_MOCK_MODE = 'report-real-unverified'
+        $noneUnverified = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $rungProject, '-PromptFile', '.loop\tmp\build packet.txt', '-OutFile', '.loop\build\b1-report.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($noneUnverified.ExitCode -eq 0) -Message "A not-verified real proof under a contract declaring none was rejected: $($noneUnverified.Output)"
+        $noneMeta = [IO.File]::ReadAllText((Join-Path $rungProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+        Assert-True -Condition ($noneMeta.proofs.real_declared -eq 'none' -and $noneMeta.proofs.real -eq 'not-verified' -and -not [bool]$noneMeta.proof_real_open) -Message 'Proof metadata for a none contract is wrong.'
+        $pinNone = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-pin')
+        Assert-True -Condition ($pinNone.ExitCode -eq 0) -Message "build-pin failed under a none contract: $($pinNone.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($rungStatePath) -match '(?m)^open:\s*$') -Message 'A none contract still opened PROOF-REAL.'
+
+        # A declared real proof command left not-verified is recorded as open:
+        # PROOF-REAL by the pin and blocks completion until a report passes it.
+        [IO.File]::WriteAllText($contractPath, $contractBoth, $utf8NoBom)
+        $env:XLOOP_MOCK_MODE = 'report-real-unverified'
+        $commandUnverified = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $rungProject, '-PromptFile', '.loop\tmp\build packet.txt', '-OutFile', '.loop\build\b1-report.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($commandUnverified.ExitCode -eq 0) -Message "A well-formed not-verified real proof was rejected: $($commandUnverified.Output)"
+        $commandMeta = [IO.File]::ReadAllText((Join-Path $rungProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+        Assert-True -Condition ([bool]$commandMeta.proof_real_open -and $commandMeta.proofs.real_declared -eq 'command') -Message 'A not-verified declared real proof was not flagged open in metadata.'
+        $pinOpen = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-pin')
+        Assert-True -Condition ($pinOpen.ExitCode -eq 0) -Message "build-pin failed with an unverified real proof: $($pinOpen.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText($rungStatePath) -match '(?m)^open: PROOF-REAL\s*$') -Message 'An unverified declared real proof was not recorded as open: PROOF-REAL.'
+        $inspectOpen = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-inspect', '-PinnedSha', '0123456789abcdef0123456789abcdef01234567')
+        Assert-True -Condition ($inspectOpen.ExitCode -eq 0) -Message "build-inspect failed with PROOF-REAL open: $($inspectOpen.Output)"
+        $completeBlocked = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-complete')
+        Assert-True -Condition ($completeBlocked.ExitCode -eq 1 -and $completeBlocked.Output -match 'PROOF-REAL') -Message "build-complete was allowed while PROOF-REAL stood open: $($completeBlocked.Output)"
+        $env:XLOOP_MOCK_MODE = 'report-proofs-pass'
+        $passingReal = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $rungProject, '-PromptFile', '.loop\tmp\build packet.txt', '-OutFile', '.loop\build\b1-report.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($passingReal.ExitCode -eq 0) -Message "A report passing both proofs was rejected: $($passingReal.Output)"
+        $pinPass = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-pin')
+        Assert-True -Condition ($pinPass.ExitCode -eq 0 -and ([IO.File]::ReadAllText($rungStatePath) -match '(?m)^open:\s*$')) -Message 'A passing real proof did not clear open: PROOF-REAL.'
+        $inspectPass = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-inspect', '-PinnedSha', '0123456789abcdef0123456789abcdef01234567')
+        $completeAllowed = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $rungProject, '-Transition', 'build-complete')
+        Assert-True -Condition ($inspectPass.ExitCode -eq 0 -and $completeAllowed.ExitCode -eq 0) -Message "build-complete was refused after the real proof passed: $($completeAllowed.Output)"
+
+        # The validator accepts the em dash, the double dash, and a plain dash, and
+        # refuses a not-verified line that gives no reason.
+        $emDashReport = Join-Path $rungProject '.loop\build\b3-report.md'
+        [IO.File]::WriteAllText($emDashReport, ("PROOF-STATIC: pass`nPROOF-REAL: not-verified " + [char]0x2014 + " no browser in this sandbox`nRESULT: PASS`n"), $utf8NoBom)
+        $emDashCheck = Invoke-ChildCommand -Command (". '$common'; `$v = Get-ReportProofValidation -OutputPath '$emDashReport' -LoopRoot '$rungProject\.loop'; Write-Output ([string]`$v.Valid + '|' + [string]`$v.RealOpen)")
+        Assert-True -Condition ($emDashCheck.Output -eq 'True|True') -Message "An em-dash not-verified line was not parsed: $($emDashCheck.Output)"
+        [IO.File]::WriteAllText($emDashReport, "PROOF-STATIC: pass`nPROOF-REAL: not-verified`nRESULT: PASS`n", $utf8NoBom)
+        $noReasonCheck = Invoke-ChildCommand -Command (". '$common'; `$v = Get-ReportProofValidation -OutputPath '$emDashReport' -LoopRoot '$rungProject\.loop'; Write-Output ([string]`$v.Valid)")
+        Assert-True -Condition ($noReasonCheck.Output -eq 'False') -Message 'A not-verified proof line without a reason passed validation.'
+
+        # S5: fix coverage is computed clerically from commit subjects in the pinned
+        # range against the open IDs; two of three covered yields exact values.
+        function Invoke-FixtureGit {
+            # Fixture repositories: CRLF warnings arrive on stderr and must not trip
+            # the suite's Stop preference, and signing is never wanted here.
+            param([string]$Root, [string[]]$GitArguments)
+            $savedPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $output = @(& git -c core.autocrlf=false -c core.safecrlf=false -c commit.gpgsign=false -C $Root @GitArguments 2>&1)
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $savedPreference
+            }
+            $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+            if ($exitCode -ne 0) { throw "git $($GitArguments -join ' ') failed in ${Root}: $text" }
+            return $text
+        }
+        $savedGitEnv = @{}
+        foreach ($name in @('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL')) { $savedGitEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
+        $env:GIT_AUTHOR_NAME = 'xloop smoke'
+        $env:GIT_COMMITTER_NAME = 'xloop smoke'
+        $env:GIT_AUTHOR_EMAIL = 'smoke@localhost'
+        $env:GIT_COMMITTER_EMAIL = 'smoke@localhost'
+        try {
+            $fixRepo = Join-Path $tempRoot 'fix coverage repo'
+            [IO.Directory]::CreateDirectory($fixRepo) | Out-Null
+            [void](Invoke-FixtureGit -Root $fixRepo -GitArguments @('init', '-q'))
+            $fixCommits = @(
+                @{ File = 'base.txt'; Subject = 'initial project' },
+                @{ File = 'one.txt'; Subject = 'B1.3: reject duplicate keys during a 429 storm' },
+                @{ File = 'two.txt'; Subject = 'chore: unrelated tidy-up' },
+                @{ File = 'three.txt'; Subject = 'B1.5, B1.9: bound the retry loop' }
+            )
+            $fixShas = @()
+            foreach ($commit in $fixCommits) {
+                [IO.File]::WriteAllText((Join-Path $fixRepo $commit.File), ($commit.Subject + "`n"), $utf8NoBom)
+                [void](Invoke-FixtureGit -Root $fixRepo -GitArguments @('add', '-A'))
+                [void](Invoke-FixtureGit -Root $fixRepo -GitArguments @('commit', '-q', '-m', $commit.Subject))
+                $fixShas += (Invoke-FixtureGit -Root $fixRepo -GitArguments @('rev-parse', 'HEAD'))
+            }
+            $fixInit = Invoke-ChildCommand -Command ($isolateClaudeOnly + "& '$initScript' -Project '$fixRepo' -Author 'claude' -LoopName 'coverage-smoke'; exit `$LASTEXITCODE")
+            Assert-True -Condition ($fixInit.ExitCode -eq 0) -Message "Coverage fixture initialization failed: $($fixInit.Output)"
+            $fixStatePath = Join-Path $fixRepo '.loop\STATE.md'
+            $fixStateText = [IO.File]::ReadAllText($fixStatePath)
+            $fixStateText = $fixStateText -replace '(?m)^phase: recon(?=\r?$)', 'phase: build' -replace '(?m)^build_round: 0(?=\r?$)', 'build_round: 2' -replace '(?m)^build_step:(?=\r?$)', 'build_step: pin' -replace '(?m)^open:(?=\r?$)', 'open: B1.3,B1.4,B1.5'
+            [IO.File]::WriteAllText($fixStatePath, $fixStateText, $utf8NoBom)
+            $coverage = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $fixRepo, '-Transition', 'build-inspect', '-PinnedSha', $fixShas[3], '-PreviousPinnedSha', $fixShas[0])
+            Assert-True -Condition ($coverage.ExitCode -eq 0) -Message "build-inspect with coverage failed: $($coverage.Output)"
+            $coverageJson = $coverage.Output | ConvertFrom-Json
+            Assert-True -Condition ($coverageJson.fix_coverage -ceq 'B1.3,B1.5' -and $coverageJson.fix_uncovered -ceq 'B1.4') -Message "Fix coverage is wrong: coverage=$($coverageJson.fix_coverage) uncovered=$($coverageJson.fix_uncovered)"
+            $coverageState = [IO.File]::ReadAllText($fixStatePath)
+            Assert-True -Condition ($coverageState -match '(?m)^fix_coverage: B1\.3,B1\.5\s*$' -and $coverageState -match '(?m)^fix_uncovered: B1\.4\s*$') -Message 'Fix coverage was not written into STATE.md.'
+            $coverageReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $fixRepo, '-Transition', 'build-inspect', '-PinnedSha', $fixShas[3], '-PreviousPinnedSha', $fixShas[0])
+            Assert-True -Condition ((($coverageReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying build-inspect with coverage was not idempotent.'
+
+            # S12: report-only recovery after a write-mode timeout that left commits.
+            $recoverRepo = Join-Path $tempRoot 'report recovery repo'
+            [IO.Directory]::CreateDirectory($recoverRepo) | Out-Null
+            [void](Invoke-FixtureGit -Root $recoverRepo -GitArguments @('init', '-q'))
+            [IO.File]::WriteAllText((Join-Path $recoverRepo 'base.txt'), "base`n", $utf8NoBom)
+            [void](Invoke-FixtureGit -Root $recoverRepo -GitArguments @('add', '-A'))
+            [void](Invoke-FixtureGit -Root $recoverRepo -GitArguments @('commit', '-q', '-m', 'initial project'))
+            $recoverBase = Invoke-FixtureGit -Root $recoverRepo -GitArguments @('rev-parse', 'HEAD')
+            $recoverInit = Invoke-ChildCommand -Command ($isolateClaudeOnly + "& '$initScript' -Project '$recoverRepo' -Author 'claude' -LoopName 'recovery-smoke'; exit `$LASTEXITCODE")
+            Assert-True -Condition ($recoverInit.ExitCode -eq 0) -Message "Recovery fixture initialization failed: $($recoverInit.Output)"
+            $recoverStatePath = Join-Path $recoverRepo '.loop\STATE.md'
+            $recoverStateText = [IO.File]::ReadAllText($recoverStatePath) -replace '(?m)^phase: recon(?=\r?$)', 'phase: build' -replace '(?m)^build_round: 0(?=\r?$)', 'build_round: 1' -replace '(?m)^build_step:(?=\r?$)', 'build_step: summon' -replace '(?m)^base_sha:.*(?=\r?$)', ('base_sha: ' + $recoverBase)
+            [IO.File]::WriteAllText($recoverStatePath, $recoverStateText, $utf8NoBom)
+            $recoverMetaPath = Join-Path $recoverRepo '.loop\build\b1-report.md.meta.json'
+            [IO.File]::WriteAllText($recoverMetaPath, '{"tool":"codex","exit_code":3,"failure_class":"timeout","timeout_kind":"hard","sandbox":"write"}', $utf8NoBom)
+            $noCommits = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $recoverRepo, '-Transition', 'build-report-only')
+            Assert-True -Condition ($noCommits.ExitCode -eq 1 -and $noCommits.Output -match 'No commits') -Message "build-report-only was allowed with no commits after the pin: $($noCommits.Output)"
+            [IO.File]::WriteAllText((Join-Path $recoverRepo 'feature.txt'), "feature`n", $utf8NoBom)
+            [void](Invoke-FixtureGit -Root $recoverRepo -GitArguments @('add', '-A'))
+            [void](Invoke-FixtureGit -Root $recoverRepo -GitArguments @('commit', '-q', '-m', 'D1: add the feature'))
+            $withCommits = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $recoverRepo, '-Transition', 'build-report-only')
+            Assert-True -Condition ($withCommits.ExitCode -eq 0) -Message "build-report-only was refused with commits present: $($withCommits.Output)"
+            $withCommitsJson = $withCommits.Output | ConvertFrom-Json
+            Assert-True -Condition ($withCommitsJson.build_step -eq 'report-only' -and $withCommitsJson.commit_range -ceq ($recoverBase + '..HEAD') -and [int]$withCommitsJson.commit_count -eq 1) -Message "build-report-only did not report the commit range: $($withCommits.Output)"
+            Assert-True -Condition ([IO.File]::ReadAllText($recoverStatePath) -match '(?m)^build_step: report-only\s*$') -Message 'build-report-only did not advance the build step.'
+            $recoverReplay = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $recoverRepo, '-Transition', 'build-report-only')
+            Assert-True -Condition ((($recoverReplay.Output | ConvertFrom-Json).already_applied) -eq $true) -Message 'Replaying build-report-only was not idempotent.'
+            [IO.File]::WriteAllText($recoverMetaPath, '{"tool":"codex","exit_code":0,"sandbox":"write"}', $utf8NoBom)
+            [IO.File]::WriteAllText($recoverStatePath, $recoverStateText, $utf8NoBom)
+            $cleanExit = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $recoverRepo, '-Transition', 'build-report-only')
+            Assert-True -Condition ($cleanExit.ExitCode -eq 1) -Message 'build-report-only was allowed after a summon that did not time out.'
+            [IO.File]::WriteAllText($recoverMetaPath, '{"tool":"codex","exit_code":3,"sandbox":"read-only"}', $utf8NoBom)
+            $readOnlyExit = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $recoverRepo, '-Transition', 'build-report-only')
+            Assert-True -Condition ($readOnlyExit.ExitCode -eq 1) -Message 'build-report-only was allowed after a read-only timeout.'
+            $reportValues = "round=1`r`nprotocol_path=.loop/PROTOCOL.md`r`nstate_path=.loop/STATE.md`r`ncontract_path=.loop/build/CONTRACT.md`r`ncommit_range=$recoverBase..HEAD`r`nreport_path=.loop/build/b1-report.md`r`n"
+            [IO.File]::WriteAllText((Join-Path $recoverRepo '.loop\tmp\report-values.txt'), $reportValues, $utf8NoBom)
+            $reportRender = Invoke-ChildPowerShell -Script $renderScript -Arguments @('-Project', $recoverRepo, '-Template', 'report.txt', '-OutFile', '.loop\tmp\report-packet.txt', '-ValuesFile', '.loop\tmp\report-values.txt')
+            Assert-True -Condition ($reportRender.ExitCode -eq 0) -Message "report.txt did not render: $($reportRender.Output)"
+            Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $recoverRepo '.loop\tmp\report-packet.txt')) -match ('(?m)^Commits: ' + [regex]::Escape($recoverBase) + '\.\.HEAD\s*$')) -Message 'The report packet does not carry the commit range.'
+        } finally {
+            foreach ($name in @($savedGitEnv.Keys)) { [Environment]::SetEnvironmentVariable($name, $savedGitEnv[$name]) }
+            # Git object files are read-only; the suite's final Directory.Delete
+            # cannot remove them, so the fixture repositories go here.
+            foreach ($fixture in @((Join-Path $tempRoot 'fix coverage repo'), (Join-Path $tempRoot 'report recovery repo'))) {
+                if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # S11: a provider that refuses connections is caught by the pre-flight probe
+        # from this process context: exit 1, provider-unreachable, no nudge spent,
+        # no packet file changed, no summon attempted.
+        $probeCalls = Join-Path $tempRoot 'probe-calls.log'
+        $env:XLOOP_MOCK_CALLS_FILE = $probeCalls
+        $probeStateBefore = [IO.File]::ReadAllBytes($statePath)
+        $probePromptBefore = [IO.File]::ReadAllBytes($promptPath)
+        $probeLedgerBefore = [IO.File]::ReadAllBytes($ledgerPath)
+        try {
+            [IO.File]::WriteAllText($probeCalls, '')
+            $env:XLOOP_MOCK_MODE = 'bom'
+            $env:XLOOP_MOCK_CLAUDE_MODE = 'unreachable'
+            $env:XLOOP_PROBE_ARGS_CLAUDE = 'auth status'
+            $unreachableOut = '.loop\rounds\unreachable-claude.md'
+            $unreachable = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $unreachableOut, '-TimeoutSec', '5')
+            Assert-True -Condition ($unreachable.ExitCode -eq 1) -Message "An unreachable provider returned $($unreachable.ExitCode), expected 1: $($unreachable.Output)"
+            $unreachableMeta = [IO.File]::ReadAllText((Join-Path $project ($unreachableOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ($unreachableMeta.failure_class -eq 'provider-unreachable') -Message "A refused connection was classified as $($unreachableMeta.failure_class)."
+            Assert-True -Condition ([string]$unreachableMeta.nudge_class -eq '' -and -not [bool]$unreachableMeta.quota_failover) -Message 'A refused connection spent a nudge or crossed the provider boundary.'
+            Assert-True -Condition ($unreachableMeta.provider_probe.method -eq 'cli' -and $unreachableMeta.provider_probe.result -eq 'refused') -Message 'The probe result was not recorded in the summon metadata.'
+            Assert-True -Condition ($unreachableMeta.remediation -match 'captured child' -and $unreachableMeta.remediation -match 'visible console' -and $unreachable.Output -match 'provider claude refused') -Message "The remediation hint does not name the process context: $($unreachableMeta.remediation)"
+            Assert-True -Condition ((@([IO.File]::ReadAllLines($probeCalls)) -join ',') -eq 'claude:unreachable') -Message "The refused probe still attempted a summon: $((@([IO.File]::ReadAllLines($probeCalls)) -join ','))"
+            Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $project $unreachableOut))) -Message 'A refused pre-flight still produced an output file.'
+            Assert-True -Condition (@(Compare-Object $probeStateBefore ([IO.File]::ReadAllBytes($statePath)) -SyncWindow 0).Count -eq 0) -Message 'A refused pre-flight changed STATE.md.'
+            Assert-True -Condition (@(Compare-Object $probePromptBefore ([IO.File]::ReadAllBytes($promptPath)) -SyncWindow 0).Count -eq 0) -Message 'A refused pre-flight changed the packet prompt.'
+            Assert-True -Condition (@(Compare-Object $probeLedgerBefore ([IO.File]::ReadAllBytes($ledgerPath)) -SyncWindow 0).Count -eq 0) -Message 'A refused pre-flight wrote a ledger line.'
+            Remove-Item Env:XLOOP_PROBE_ARGS_CLAUDE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_CLAUDE_MODE -ErrorAction SilentlyContinue
+
+            # The socket probe: a closed loopback port is a real refused connection.
+            $closedListener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+            $closedListener.Start()
+            $closedPort = ([Net.IPEndPoint]$closedListener.LocalEndpoint).Port
+            $closedListener.Stop()
+            [IO.File]::WriteAllText($probeCalls, '')
+            $env:XLOOP_PROBE_ENDPOINT_CODEX = '127.0.0.1:' + $closedPort
+            $socketOut = '.loop\rounds\unreachable-codex.md'
+            $socketRefused = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $socketOut, '-TimeoutSec', '5')
+            Assert-True -Condition ($socketRefused.ExitCode -eq 1) -Message "A refused socket probe returned $($socketRefused.ExitCode), expected 1: $($socketRefused.Output)"
+            $socketMeta = [IO.File]::ReadAllText((Join-Path $project ($socketOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ($socketMeta.failure_class -eq 'provider-unreachable' -and $socketMeta.provider_probe.method -eq 'socket' -and $socketMeta.provider_probe.endpoint -eq ('127.0.0.1:' + $closedPort)) -Message 'The socket probe refusal was not recorded.'
+            Assert-True -Condition ([IO.File]::ReadAllText($probeCalls).Trim() -eq '') -Message 'A refused socket probe still attempted a summon.'
+
+            # A listening endpoint is reachable and the summon proceeds normally.
+            $openListener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+            $openListener.Start()
+            try {
+                $env:XLOOP_PROBE_ENDPOINT_CODEX = '127.0.0.1:' + ([Net.IPEndPoint]$openListener.LocalEndpoint).Port
+                $reachable = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\rounds\reachable-codex.md', '-TimeoutSec', '5')
+                Assert-True -Condition ($reachable.ExitCode -eq 0) -Message "A reachable provider summon failed: $($reachable.Output)"
+                $reachableMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\rounds\reachable-codex.md.meta.json')) | ConvertFrom-Json
+                Assert-True -Condition ($reachableMeta.provider_probe.result -eq 'reachable') -Message "A reachable probe was recorded as $($reachableMeta.provider_probe.result)."
+            } finally {
+                $openListener.Stop()
+            }
+            $env:XLOOP_PROBE_ENDPOINT_CODEX = 'none'
+
+            # A refusal reported by the summon itself carries the same class.
+            $env:XLOOP_MOCK_CODEX_MODE = 'unreachable'
+            $lateOut = '.loop\rounds\unreachable-late.md'
+            $lateRefusal = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', $lateOut, '-TimeoutSec', '5')
+            Assert-True -Condition ($lateRefusal.ExitCode -eq 1) -Message "A summon-time refusal returned $($lateRefusal.ExitCode), expected 1."
+            $lateMeta = [IO.File]::ReadAllText((Join-Path $project ($lateOut + '.meta.json'))) | ConvertFrom-Json
+            Assert-True -Condition ($lateMeta.failure_class -eq 'provider-unreachable' -and -not [bool]$lateMeta.quota_failover) -Message "A summon-time refusal was classified as $($lateMeta.failure_class)."
+            Remove-Item Env:XLOOP_MOCK_CODEX_MODE -ErrorAction SilentlyContinue
+
+            # doctor runs the same probe and only a refusal fails it.
+            $env:XLOOP_PROBE_ENDPOINT_CLAUDE = '127.0.0.1:' + $closedPort
+            $doctor = Invoke-ChildPowerShell -Script (Join-Path $repo 'scripts\doctor.ps1') -Arguments @('-CodexPath', $codexMock, '-ClaudePath', $claudeMock)
+            $doctorJson = ($doctor.Output -replace '(?s)^[^{]*', '') | ConvertFrom-Json
+            Assert-True -Condition ($doctorJson.checks.codex_reachability.result -eq 'skipped' -and $doctorJson.checks.codex_reachability.ok -eq $true) -Message "doctor did not skip a disabled probe: $($doctor.Output)"
+            Assert-True -Condition ($doctorJson.checks.claude_reachability.result -eq 'refused' -and $doctorJson.checks.claude_reachability.ok -eq $false -and $doctorJson.checks.claude_reachability.remediation -match 'refused') -Message "doctor did not report a refused provider: $($doctor.Output)"
+            $env:XLOOP_PROBE_ENDPOINT_CLAUDE = 'none'
+        } finally {
+            Remove-Item Env:XLOOP_MOCK_CALLS_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_CLAUDE_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_CODEX_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_PROBE_ARGS_CLAUDE -ErrorAction SilentlyContinue
+            $env:XLOOP_PROBE_ENDPOINT_CLAUDE = 'none'
+            $env:XLOOP_PROBE_ENDPOINT_CODEX = 'none'
+        }
+
+        # S12: write-mode timeouts are liveness-based. A builder that keeps emitting
+        # output outlives the soft cap and is still killed at the hard cap; a silent
+        # one is stopped at the soft cap; a quick one completes through the
+        # incremental reader with its output intact.
+        $env:XLOOP_MOCK_MODE = 'result-pass'
+        $quickWrite = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\b9-report.md', '-Sandbox', 'write', '-TimeoutSec', '20', '-SoftTimeoutSec', '3')
+        Assert-True -Condition ($quickWrite.ExitCode -eq 0) -Message "A quick write summon under the soft cap failed: $($quickWrite.Output)"
+        Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $project '.loop\build\b9-report.md')) -match 'RESULT: PASS') -Message 'The liveness reader lost the summon output.'
+        $quickMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\b9-report.md.meta.json')) | ConvertFrom-Json
+        Assert-True -Condition ([int]$quickMeta.soft_timeout_sec -eq 3) -Message 'The soft cap was not recorded in metadata.'
+
+        $env:XLOOP_MOCK_MODE = 'slow-builder'
+        $env:XLOOP_MOCK_TICK_MS = '500'
+        $env:XLOOP_MOCK_TICKS = '60'
+        $env:XLOOP_MOCK_SILENT_MS = '0'
+        try {
+            $liveStart = [datetime]::UtcNow
+            $liveBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\live-builder.md', '-Sandbox', 'write', '-TimeoutSec', '7', '-SoftTimeoutSec', '2')
+            $liveSeconds = ([datetime]::UtcNow - $liveStart).TotalSeconds
+            Assert-True -Condition ($liveBuilder.ExitCode -eq 3) -Message "An active builder returned $($liveBuilder.ExitCode), expected 3 at the hard cap: $($liveBuilder.Output)"
+            $liveMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\live-builder.md.meta.json')) | ConvertFrom-Json
+            Assert-True -Condition ($liveMeta.timeout_kind -eq 'hard' -and $liveMeta.failure_class -eq 'timeout') -Message "An active builder was killed by the soft cap: $($liveMeta.timeout_kind)"
+            Assert-True -Condition ($liveSeconds -ge 6 -and $liveSeconds -lt 25) -Message "An active builder did not run to the hard cap: $([int]$liveSeconds) s"
+
+            $env:XLOOP_MOCK_TICKS = '0'
+            $env:XLOOP_MOCK_SILENT_MS = '15000'
+            $quietStart = [datetime]::UtcNow
+            $quietBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\quiet-builder.md', '-Sandbox', 'write', '-TimeoutSec', '30', '-SoftTimeoutSec', '2')
+            $quietSeconds = ([datetime]::UtcNow - $quietStart).TotalSeconds
+            Assert-True -Condition ($quietBuilder.ExitCode -eq 3) -Message "A silent builder returned $($quietBuilder.ExitCode), expected 3 at the soft cap: $($quietBuilder.Output)"
+            $quietMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\quiet-builder.md.meta.json')) | ConvertFrom-Json
+            Assert-True -Condition ($quietMeta.timeout_kind -eq 'soft') -Message "A silent builder was not stopped by the soft cap: $($quietMeta.timeout_kind)"
+            Assert-True -Condition ($quietSeconds -lt 14) -Message "A silent builder ran past the soft cap: $([int]$quietSeconds) s"
+
+            # Read-only summons keep the single hard cap: the soft cap does not apply.
+            $env:XLOOP_MOCK_TICKS = '0'
+            $env:XLOOP_MOCK_SILENT_MS = '3500'
+            $readQuiet = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\b10-report.md', '-TimeoutSec', '20', '-SoftTimeoutSec', '1')
+            Assert-True -Condition ($readQuiet.ExitCode -eq 0) -Message "A read-only summon was stopped by the write-mode soft cap: $($readQuiet.Output)"
+        } finally {
+            Remove-Item Env:XLOOP_MOCK_TICK_MS -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_TICKS -ErrorAction SilentlyContinue
+            Remove-Item Env:XLOOP_MOCK_SILENT_MS -ErrorAction SilentlyContinue
+        }
+        # ---- end loop B ----
     } finally {
         $env:PATH = $savedPath
+        Remove-Item Env:XLOOP_PROBE_ENDPOINT_CLAUDE -ErrorAction SilentlyContinue
+        Remove-Item Env:XLOOP_PROBE_ENDPOINT_CODEX -ErrorAction SilentlyContinue
         Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
     }
 } finally {

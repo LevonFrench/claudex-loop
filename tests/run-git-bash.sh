@@ -49,6 +49,9 @@ for script in loop-common.ps1 loop-visible-run.ps1 loop-render.ps1 loop-step.ps1
 done
 
 export MSYS2_ARG_CONV_EXCL='*'
+# Mock providers have no network endpoint: skip the reachability pre-flight here.
+export XLOOP_PROBE_ENDPOINT_CLAUDE='none'
+export XLOOP_PROBE_ENDPOINT_CODEX='none'
 
 # The clerical helpers must work when the driver is running under Git Bash.
 project="$tmp_root/project from bash"

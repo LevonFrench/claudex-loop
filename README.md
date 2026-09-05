@@ -168,7 +168,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\mechanic
 bash ./tests/run-git-bash.sh
 ```
 
-They cover PowerShell 5.1 parsing, Unicode and spaced paths, byte-exact installs, BOM state, strict verdict/result validation, exit-code propagation, timeout termination, and failed-resume fallback. Windows CI runs both shells.
+They cover PowerShell 5.1 parsing, Unicode and spaced paths, byte-exact installs, BOM state, strict verdict/result validation, proof-line validation against the build contract, fix coverage from commit subjects, the provider-unreachable pre-flight, report-only recovery, liveness-based write timeouts, exit-code propagation, timeout termination, and failed-resume fallback. Windows CI runs both shells.
 
 Live acceptance is intentionally separate: run a user-selected wiki-warm project, including a kill between review rounds 2 and 3, then run a disposable sparse/no-wiki project to exercise bootstrap.
 

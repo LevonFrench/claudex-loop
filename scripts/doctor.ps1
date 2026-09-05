@@ -81,7 +81,25 @@ $checks = [ordered]@{
     }
 }
 
-$ok = $checks.powershell_5_1.ok -and $checks.git.ok -and $checks.codex.ok -and $checks.claude.ok -and $checks.codex.flags.ok -and $checks.claude.flags.ok
+
+# The same token-free pre-flight the wrappers run before a summon (protocol §6):
+# only an actual refused connection fails the check; an offline or slow network
+# is reported as inconclusive and does not.
+foreach ($provider in @('codex', 'claude')) {
+    $agent = if ($provider -eq 'codex') { $codex } else { $claude }
+    $probe = Test-ProviderReachability -Provider $provider -Executable $(if ($agent) { $agent.Source } else { '' })
+    $checks[$provider + '_reachability'] = [ordered]@{
+        ok = ($probe['result'] -ne 'refused')
+        result = $probe['result']
+        method = $probe['method']
+        endpoint = $probe['endpoint']
+        context = $probe['context']
+        detail = $probe['detail']
+        remediation = if ($probe['result'] -eq 'refused') { Get-ProviderUnreachableHint -Provider $provider -Probe $probe } else { '' }
+    }
+}
+
+$ok = $checks.powershell_5_1.ok -and $checks.git.ok -and $checks.codex.ok -and $checks.claude.ok -and $checks.codex.flags.ok -and $checks.claude.flags.ok -and $checks.codex_reachability.ok -and $checks.claude_reachability.ok
 [pscustomobject]@{
     ok = $ok
     checks = $checks

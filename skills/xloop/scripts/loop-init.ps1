@@ -173,9 +173,12 @@ base_sha: $baseSha
 pinned_sha:
 previous_pinned_sha:
 proof_cmd:
+proof_real:
 verdict:
 open:
 settled:
+fix_coverage:
+fix_uncovered:
 format_nudged:
 mutation_nudged:
 lock: $Author $PID $stamp

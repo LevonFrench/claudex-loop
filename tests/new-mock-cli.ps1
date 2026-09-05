@@ -32,6 +32,8 @@ public static class MockCli {
         if (mode == "approve-pseudo") return "[F5] No blocking scenario survives in the replacement sections.\n\nVERDICT: APPROVE\n";
         if (mode == "approve-bracket-word") return "[Format] note: the plan reads cleanly.\nVERDICT: APPROVE\n";
         if (mode == "result-pass") return "build report\nRESULT: PASS\n";
+        if (mode == "report-proofs-pass") return "commits: abc1234 B1.3: close it\nPROOF-STATIC: pass\nall 12 tests passed\nPROOF-REAL: pass\nsmoke ok\nRESULT: PASS\n";
+        if (mode == "report-real-unverified") return "commits: abc1234 B1.3: close it\nPROOF-STATIC: pass\nall 12 tests passed\nPROOF-REAL: not-verified - the sandbox has no browser\nRESULT: PASS\n";
         if (mode == "append-inbox" || mode == "rewrite-inbox") return "closeout steps completed\nRESULT: PASS\n";
         return "review complete\nVERDICT: APPROVE\n\n";
     }
@@ -109,6 +111,29 @@ public static class MockCli {
             }
             Console.Error.WriteLine("You've hit your usage limit; resets later.");
             return 29;
+        }
+        if (mode == "unreachable") {
+            // A provider whose process context cannot reach the network fails before
+            // inference with a refused connection and zero tokens, on the probe
+            // invocation and on the summon alike.
+            Console.Error.WriteLine("Error: connect ECONNREFUSED 127.0.0.1:443 (ConnectionRefused)");
+            return 1;
+        }
+        if (mode == "slow-builder") {
+            // A builder that keeps working: silent for XLOOP_MOCK_SILENT_MS, then one
+            // line per XLOOP_MOCK_TICK_MS for XLOOP_MOCK_TICKS ticks, then a valid
+            // report. Liveness tests scale these down to seconds.
+            int silentMs = 0; int tickMs = 500; int ticks = 20;
+            Int32.TryParse(Environment.GetEnvironmentVariable("XLOOP_MOCK_SILENT_MS") ?? "0", out silentMs);
+            Int32.TryParse(Environment.GetEnvironmentVariable("XLOOP_MOCK_TICK_MS") ?? "500", out tickMs);
+            Int32.TryParse(Environment.GetEnvironmentVariable("XLOOP_MOCK_TICKS") ?? "20", out ticks);
+            if (silentMs > 0) Thread.Sleep(silentMs);
+            for (int i = 0; i < ticks; i++) {
+                Console.Error.WriteLine("builder tick " + i);
+                Console.Error.Flush();
+                Thread.Sleep(tickMs);
+            }
+            mode = "result-pass";
         }
         if (mode == "rate-limit") { Console.Error.WriteLine("429 rate limit exceeded; retry after 10 seconds."); return 30; }
         if (mode == "auth-fail") { Console.Error.WriteLine("authentication failed: invalid API key"); return 31; }

@@ -1,0 +1,12 @@
+Act as builder for a report-only recovery round. The previous write summon timed out after committing its work: the commits in the range below already exist and must not be redone, amended, or reverted. Read the protocol, state, and build contract at these paths, run the contract proofs, and produce only the report: the commit list for the range, its diff stat, one status line per declared proof (PROOF-STATIC and PROOF-REAL, each pass, fail, or not-verified with a reason) followed by that proof's bounded output tail, and the terminal RESULT line. Do not implement anything new; if the range is incomplete against the contract, say so in the report and let the inspector decide.
+
+Your final message is stored verbatim as the output path: it must contain only the artifact, with no preamble, tooling discussion, or code fence. Nobody is present, so never ask for approval, permission, or clarification; if you cannot write files, that is expected, and your final message is still the artifact. Under .loop nothing but the report path may change. STATE, PROTOCOL, PLAN, REVIEW-LOG, REQUEST, ASSUMPTIONS, QUESTIONS, and every packet evidence file are immutable here; any edit to them is restored and costs the round.
+
+The last non-blank line must be exactly RESULT: PASS or RESULT: FAIL. Report proof failures honestly rather than narrating success.
+
+Round: {{round}}
+Protocol: {{protocol_path}}
+State: {{state_path}}
+Contract: {{contract_path}}
+Commits: {{commit_range}}
+Report: {{report_path}}

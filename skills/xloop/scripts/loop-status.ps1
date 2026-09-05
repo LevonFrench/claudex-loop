@@ -47,6 +47,7 @@ function Get-NextPacket {
             switch ($State['build_step']) {
                 'summon' { return ('PROTOCOL.md, STATE.md, PLAN.md, build/CONTRACT.md -> build/b{0}-report.md' -f $buildRound) }
                 'fix' { return ('PROTOCOL.md, STATE.md, build/CONTRACT.md, build/b{0}-inspect.md -> build/b{1}-report.md' -f ($buildRound - 1), $buildRound) }
+                'report-only' { return ('PROTOCOL.md, STATE.md, build/CONTRACT.md, commits pinned_sha..HEAD -> build/b{0}-report.md' -f $buildRound) }
                 'pin' { return ('STATE.md, build/b{0}-report.md -> build/b{0}.diff' -f $buildRound) }
                 'inspect' { return ('PROTOCOL.md, STATE.md, PLAN.md, build/b{0}.diff, build/b{0}-report.md -> build/b{0}-inspect.md' -f $buildRound) }
                 'awaiting-user' { return 'STATE.md, QUESTIONS.md, REVIEW-LOG.md, current build inspection' }

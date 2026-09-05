@@ -19,6 +19,12 @@ param(
     [ValidateRange(1, 86400)]
     [int]$TimeoutSec = 600,
 
+    # Write mode only: the hard cap above stays absolute, while this shorter cap is
+    # re-armed by every new commit, worktree change, or wrapper-visible output.
+    # 0 disables the soft cap; a value at or above -TimeoutSec has no effect.
+    [ValidateRange(0, 86400)]
+    [int]$SoftTimeoutSec = 300,
+
     [string]$Model = '',
 
     [string]$CodexPath = '',
@@ -113,6 +119,21 @@ try {
     $codex = Resolve-AgentExecutable -Name 'codex' -ExplicitPath $CodexPath
     $wantVisible = Get-LoopVisiblePreference -Visible:$Visible -Headless:$Headless
     $expectedTerminator = if ($Expect) { $Expect } else { Get-ExpectedTerminatorKind -OutputPath $outputPath }
+    $softCap = if ($Sandbox -eq 'write') { $SoftTimeoutSec } else { 0 }
+
+    # Pre-flight (protocol §6): a token-free reachability probe from this process
+    # context. A refusal is reported before any packet file is touched or a nudge
+    # is spent, with a hint naming the context the summon would have inherited.
+    $providerProbe = Test-ProviderReachability -Provider 'codex' -Executable $codex -WorkingDirectory $root
+    # fired: provider-probe
+    if ($providerProbe['result'] -eq 'refused') {
+        $hint = Get-ProviderUnreachableHint -Provider 'codex' -Probe $providerProbe
+        $metadata = [ordered]@{ tool = 'codex'; exit_code = 1; failure_class = 'provider-unreachable'; quota_failover = $false; resumed = $false; resume_fallback = $false; thread_id = $ResumeThread; out_file = $outputPath; sandbox = $Sandbox; nudge_class = ''; provider_probe = $providerProbe; remediation = $hint; mutations = @(); appends = @(); attempts = @() }
+        Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
+        $metadata | ConvertTo-Json -Depth 6 -Compress
+        [Console]::Error.WriteLine($hint)
+        exit 1
+    }
 
     $attempts = New-Object System.Collections.ArrayList
     $fallback = $false
@@ -122,6 +143,7 @@ try {
     $attemptKind = ''
     $quotaDetected = $false
     $quotaDiagnostic = ''
+    $lastDiagnostic = ''
     $writeFlag = if ($Sandbox -eq 'write') { Get-WriteFlag -ProtocolPath (Join-Path $loopRoot 'PROTOCOL.md') } else { '' }
     $readIntentSandbox = if ($Sandbox -eq 'read-only') { Get-LoopCodexSandboxArgument -Intent 'read-only' } else { '' }
 
@@ -152,7 +174,7 @@ try {
             $list + $hardening + @('--json', '-o', $outputPath, $promptForAttempt)
         }
 
-        $native = Invoke-NativeProcess -Executable $codex -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $guard
+        $native = Invoke-NativeProcess -Executable $codex -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $guard -SoftTimeoutSeconds $softCap -LivenessRepository $root
         # Restore before anything else reads .loop, so a mutation from this attempt
         # can never reach the fresh fallback packet or survive a later failure.
         [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
@@ -160,15 +182,16 @@ try {
         $errorPath = $outputPath + '.' + $kind + '.codex.stderr.log'
         Write-Utf8NoBomAtomic -Path $eventPath -Content $native.StdOut
         Write-Utf8NoBomAtomic -Path $errorPath -Content $native.StdErr
-        [void]$attempts.Add([ordered]@{ kind = $kind; exit_code = $native.ExitCode; timed_out = $native.TimedOut; visible = $native.Visible; events = $eventPath; stderr = $errorPath })
+        [void]$attempts.Add([ordered]@{ kind = $kind; exit_code = $native.ExitCode; timed_out = $native.TimedOut; timeout_kind = $native.TimeoutKind; visible = $native.Visible; events = $eventPath; stderr = $errorPath })
 
         if ($native.TimedOut) {
-            $metadata = [ordered]@{ tool = 'codex'; exit_code = 3; resumed = ($kind -eq 'resume'); resume_fallback = $false; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
+            $metadata = [ordered]@{ tool = 'codex'; exit_code = 3; failure_class = 'timeout'; timeout_kind = $native.TimeoutKind; soft_timeout_sec = $softCap; timeout_sec = $TimeoutSec; resumed = ($kind -eq 'resume'); resume_fallback = $false; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; provider_probe = $providerProbe; mutations = @($violations); appends = @($appends); attempts = $attempts }
             Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
             [Console]::Error.WriteLine($native.StdErr)
             exit 3
         }
         $resumeDiagnostic = $native.StdOut + "`n" + $native.StdErr
+        $lastDiagnostic = $resumeDiagnostic
         if ($native.ExitCode -ne 0 -and (Test-ProviderQuotaFailure -Provider 'codex' -Text $resumeDiagnostic)) {
             $quotaDetected = $true
             $quotaDiagnostic = $resumeDiagnostic
@@ -207,6 +230,7 @@ try {
                 '-OutFile', $outputPath,
                 '-Sandbox', $Sandbox,
                 '-TimeoutSec', [string]$TimeoutSec,
+                '-SoftTimeoutSec', [string]$SoftTimeoutSec,
                 '-DisableQuotaFailover'
             )
             if ($FallbackClaudePath) { $fallbackArguments += @('-ClaudePath', $FallbackClaudePath) }
@@ -254,6 +278,8 @@ try {
                 expected_terminator = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'expected_terminator')) { [string]$alternate.expected_terminator } else { $expectedTerminator }
                 terminator = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'terminator')) { [string]$alternate.terminator } else { '' }
                 validation_error = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'validation_error')) { [string]$alternate.validation_error } else { '' }
+                proofs = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'proofs')) { $alternate.proofs } else { $null }
+                provider_probe = $providerProbe
                 mutations = $allMutations
                 appends = $alternateAppends
                 attempts = if ($null -ne $alternate -and ($alternate.PSObject.Properties.Name -contains 'attempts')) { @($alternate.attempts) } else { @() }
@@ -265,15 +291,22 @@ try {
             exit $wrapperExit
         }
         if ([System.IO.File]::Exists($outputPath)) { [System.IO.File]::Delete($outputPath) }
-        $failureClass = if ($quotaDetected) { 'quota' } else { 'tool-failure' }
-        $metadata = [ordered]@{ tool = 'codex'; exit_code = 1; failure_class = $failureClass; quota_failover = $false; resumed = $false; resume_fallback = $fallback; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; mutations = @($violations); appends = @($appends); attempts = $attempts }
+        $failureClass = if ($quotaDetected) { 'quota' } elseif (Test-ProviderConnectionRefusal -Text $lastDiagnostic) { 'provider-unreachable' } else { 'tool-failure' }
+        $remediation = if ($failureClass -eq 'provider-unreachable') { Get-ProviderUnreachableHint -Provider 'codex' -Probe ([ordered]@{ method = 'summon'; endpoint = ''; detail = 'the provider CLI reported a refused connection'; context = $providerProbe['context'] }) } else { '' }
+        $metadata = [ordered]@{ tool = 'codex'; exit_code = 1; failure_class = $failureClass; quota_failover = $false; resumed = $false; resume_fallback = $fallback; thread_id = $threadId; out_file = $outputPath; sandbox = $Sandbox; provider_probe = $providerProbe; remediation = $remediation; mutations = @($violations); appends = @($appends); attempts = $attempts }
         Write-Utf8NoBomAtomic -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
+        if ($remediation) { [Console]::Error.WriteLine($remediation) }
         [Console]::Error.WriteLine("Codex failed. See $metadataPath")
         exit 1
     }
 
     $threadId = Get-ThreadId -Events $selectedEvents -Fallback $threadId
     $validation = Get-TerminatorValidation -Path $outputPath -Expect $expectedTerminator
+    # A builder report must also answer every proof its contract declares (§3.7).
+    $proofValidation = Get-ReportProofValidation -OutputPath $outputPath -LoopRoot $loopRoot
+    if ($validation.Valid -and -not $proofValidation.Valid) {
+        $validation = [pscustomobject]@{ Valid = $false; Terminator = $validation.Terminator; Reason = $proofValidation.Reason }
+    }
     $mutationCount = @($violations).Count
     $nudgeClass = ''
     if (-not $validation.Valid) { $nudgeClass = 'format' } elseif ($mutationCount -gt 0) { $nudgeClass = 'mutation' }
@@ -292,6 +325,10 @@ try {
         expected_terminator = $expectedTerminator
         terminator = $validation.Terminator
         validation_error = $validation.Reason
+        proofs = $proofValidation.Proofs
+        proof_real_open = $proofValidation.RealOpen
+        provider_probe = $providerProbe
+        soft_timeout_sec = $softCap
         mutations = @($violations)
         appends = @($appends)
         attempts = $attempts
