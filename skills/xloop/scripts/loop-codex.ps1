@@ -120,7 +120,9 @@ try {
     [void](Register-XloopFired -Mechanism 'wrapper:codex')
     $wantVisible = Get-LoopVisiblePreference -Visible:$Visible -Headless:$Headless
     $expectedTerminator = if ($Expect) { $Expect } else { Get-ExpectedTerminatorKind -OutputPath $outputPath }
-    $softCap = if ($Sandbox -eq 'write') { $SoftTimeoutSec } else { 0 }
+    # Builder reports only: a closeout writes to the wiki root and emits nothing
+    # until it finishes, so the commit/worktree liveness cap would kill it.
+    $softCap = if ($Sandbox -eq 'write' -and (Test-BuildReportOutputPath -OutputPath $outputPath)) { $SoftTimeoutSec } else { 0 }
 
     # Pre-flight (protocol §6): a token-free reachability probe from this process
     # context. A refusal is reported before any packet file is touched or a nudge

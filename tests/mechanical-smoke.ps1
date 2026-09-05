@@ -1110,22 +1110,32 @@ try {
         $env:XLOOP_MOCK_SILENT_MS = '0'
         try {
             $liveStart = [datetime]::UtcNow
-            $liveBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\live-builder.md', '-Sandbox', 'write', '-TimeoutSec', '7', '-SoftTimeoutSec', '2')
+            $liveBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\b11-report.md', '-Sandbox', 'write', '-TimeoutSec', '7', '-SoftTimeoutSec', '2')
             $liveSeconds = ([datetime]::UtcNow - $liveStart).TotalSeconds
             Assert-True -Condition ($liveBuilder.ExitCode -eq 3) -Message "An active builder returned $($liveBuilder.ExitCode), expected 3 at the hard cap: $($liveBuilder.Output)"
-            $liveMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\live-builder.md.meta.json')) | ConvertFrom-Json
+            $liveMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\b11-report.md.meta.json')) | ConvertFrom-Json
             Assert-True -Condition ($liveMeta.timeout_kind -eq 'hard' -and $liveMeta.failure_class -eq 'timeout') -Message "An active builder was killed by the soft cap: $($liveMeta.timeout_kind)"
             Assert-True -Condition ($liveSeconds -ge 6 -and $liveSeconds -lt 25) -Message "An active builder did not run to the hard cap: $([int]$liveSeconds) s"
 
             $env:XLOOP_MOCK_TICKS = '0'
             $env:XLOOP_MOCK_SILENT_MS = '15000'
             $quietStart = [datetime]::UtcNow
-            $quietBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\quiet-builder.md', '-Sandbox', 'write', '-TimeoutSec', '30', '-SoftTimeoutSec', '2')
+            $quietBuilder = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\build\b12-report.md', '-Sandbox', 'write', '-TimeoutSec', '30', '-SoftTimeoutSec', '2')
             $quietSeconds = ([datetime]::UtcNow - $quietStart).TotalSeconds
             Assert-True -Condition ($quietBuilder.ExitCode -eq 3) -Message "A silent builder returned $($quietBuilder.ExitCode), expected 3 at the soft cap: $($quietBuilder.Output)"
-            $quietMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\quiet-builder.md.meta.json')) | ConvertFrom-Json
+            $quietMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\build\b12-report.md.meta.json')) | ConvertFrom-Json
             Assert-True -Condition ($quietMeta.timeout_kind -eq 'soft') -Message "A silent builder was not stopped by the soft cap: $($quietMeta.timeout_kind)"
             Assert-True -Condition ($quietSeconds -lt 14) -Message "A silent builder ran past the soft cap: $([int]$quietSeconds) s"
+
+            # A write-mode closeout writes to the wiki root and emits nothing until it
+            # finishes: the soft cap must not apply to it (the first live run lost a
+            # working closeout at 301 s). Only builder reports carry the soft cap.
+            $env:XLOOP_MOCK_TICKS = '0'
+            $env:XLOOP_MOCK_SILENT_MS = '3500'
+            $closeoutQuiet = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $project, '-PromptFile', '.loop\tmp\smoke prompt.txt', '-OutFile', '.loop\CLOSEOUT-REPORT.md', '-Sandbox', 'write', '-TimeoutSec', '20', '-SoftTimeoutSec', '1')
+            Assert-True -Condition ($closeoutQuiet.ExitCode -eq 0) -Message "A silent write-mode closeout was stopped by the builder soft cap: $($closeoutQuiet.Output)"
+            $closeoutMeta = [IO.File]::ReadAllText((Join-Path $project '.loop\CLOSEOUT-REPORT.md.meta.json')) | ConvertFrom-Json
+            Assert-True -Condition ([int]$closeoutMeta.soft_timeout_sec -eq 0) -Message "A closeout summon recorded a soft cap: $($closeoutMeta.soft_timeout_sec)"
 
             # Read-only summons keep the single hard cap: the soft cap does not apply.
             $env:XLOOP_MOCK_TICKS = '0'
@@ -1408,6 +1418,9 @@ try {
     Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\_index.md') -Content "# index`n- [Brief](references/codebase-brief.md)`n- [Missing](references/nope.md)`n- [Site](https://example.invalid/page)`n"
     Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\references\codebase-brief.md') -Content "---`ntitle: brief`ncategory: reference`nverified-against: $briefHead`ncovers:`n  - src/`nvolatility: hot`n---`n# Brief`n## Hot files`n- ``src/a.txt`` entry`n- ``src/missing.txt`` configuration`n## Pointers`n- [index](../_index.md)`n"
     Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2026-01-01-ll-newer.md') -Content "---`nlesson_kind: lessons-learned`nsupersedes: 2025-12-31-ll-older`n---`nnewer`n"
+    # A blank supersedes: followed by superseded-by: is not a claim; the first live
+    # run reported four false dangling targets when the parser crossed the newline.
+    Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2026-01-02-ll-blank.md') -Content "---`nlesson_kind: lessons-learned`nsupersedes:`nsuperseded-by:`n---`nblank fields`n"
 
     # Recon mode: advisory, names both dangling claims, downgrades only the
     # assumption that cites the missing path, and is idempotent.
@@ -1415,6 +1428,7 @@ try {
     Assert-True -Condition ($recon.ExitCode -eq 0) -Message "Recon-mode brief check was not advisory: $($recon.Output)"
     Assert-True -Condition ($recon.Output -match '(?m)^unverified: hot-file src/missing\.txt\b' -and $recon.Output -match '(?m)^unverified: index-link references/nope\.md\b') -Message "Recon output did not name both dangling claims: $($recon.Output)"
     Assert-True -Condition ($recon.Output -match '(?m)^unverified: supersedes 2025-12-31-ll-older\b') -Message "Recon output did not report the missing supersedes target: $($recon.Output)"
+    Assert-True -Condition ($recon.Output -notmatch 'superseded-by') -Message "A blank supersedes field was parsed as a claim: $($recon.Output)"
     Assert-True -Condition ($recon.Output -match '(?m)^OK   hot-file src/a\.txt\b' -and $recon.Output -match '(?m)^OK   proof-cmd powershell\.exe\b' -and $recon.Output -match '(?m)^OK   verified-against ') -Message "Recon output lost a resolving claim: $($recon.Output)"
     $assumptionsAfter = [IO.File]::ReadAllText($briefAssumptions)
     Assert-True -Condition ($assumptionsAfter -match '(?m)^1\. src/a\.txt .*\[brief\]\s*$') -Message "A resolving assumption was downgraded: $assumptionsAfter"

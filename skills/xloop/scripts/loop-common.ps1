@@ -437,6 +437,16 @@ function Get-ApprovalRequestValidation {
     return $result
 }
 
+function Test-BuildReportOutputPath {
+    <#
+    True when the summon output is a builder report (b<N>-report.md). The soft
+    write-mode cap applies only there: its liveness signals are commits and
+    worktree changes, which a closeout writing to the wiki root never produces.
+    #>
+    param([string]$OutputPath)
+    return [regex]::IsMatch([System.IO.Path]::GetFileName($OutputPath), '^(?i)b\d+-report\.md$')
+}
+
 function Get-ReportCommitValidation {
     <#
     Schema-over-prose detection (S10, protocol §6): a builder report produced by a
@@ -2150,6 +2160,8 @@ function Invoke-LoopBriefCheck {
     }
 
     # supersedes: Loop C adds the field; a target that does not exist is reported now.
+    # Whitespace after the colon must not cross the newline: a blank field followed
+    # by superseded-by: is not a claim (found by the first live run).
     $notesRoot = Join-Path (Join-Path $wikiRoot 'raw') 'notes'
     if ([System.IO.Directory]::Exists($notesRoot)) {
         $notes = @(Get-ChildItem -LiteralPath $notesRoot -Filter '*.md' -File -ErrorAction SilentlyContinue)
@@ -2162,7 +2174,7 @@ function Invoke-LoopBriefCheck {
         }
         foreach ($note in $notes) {
             $noteText = [System.IO.File]::ReadAllText($note.FullName)
-            foreach ($supersedes in [regex]::Matches($noteText, '(?m)^supersedes:\s*(\S+)\s*$')) {
+            foreach ($supersedes in [regex]::Matches($noteText, '(?m)^supersedes:[ \t]*(\S+)[ \t]*$')) {
                 $target = $supersedes.Groups[1].Value.Trim('"', "'")
                 $ok = $ids.Contains($target)
                 & $addClaim 'supersedes' $target $ok $(if ($ok) { 'target note exists' } else { 'target note does not exist' }) ('raw/notes/' + $note.Name)
@@ -2173,7 +2185,7 @@ function Invoke-LoopBriefCheck {
     if ([System.IO.Directory]::Exists($wikiArticles)) {
         foreach ($article in @(Get-ChildItem -LiteralPath $wikiArticles -Filter '*.md' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)decision' })) {
             $articleText = [System.IO.File]::ReadAllText($article.FullName)
-            foreach ($supersedes in [regex]::Matches($articleText, '(?im)^.*\bSupersedes:\s*([A-Za-z][A-Za-z0-9._-]*)\b.*$')) {
+            foreach ($supersedes in [regex]::Matches($articleText, '(?im)^.*\bSupersedes:[ \t]*([A-Za-z][A-Za-z0-9._-]*)\b.*$')) {
                 $target = $supersedes.Groups[1].Value
                 $others = $articleText.Replace($supersedes.Value, '')
                 $ok = [regex]::IsMatch($others, ('(?<![A-Za-z0-9])' + [regex]::Escape($target) + '(?![A-Za-z0-9])'))
