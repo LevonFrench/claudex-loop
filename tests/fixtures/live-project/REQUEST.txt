@@ -1,0 +1,1 @@
+Add a -Shout switch to src/greet.ps1 that upper-cases the greeting, cover it with a case in tests/greet.tests.ps1, and note the switch in README.md.

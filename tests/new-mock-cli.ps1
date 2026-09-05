@@ -35,6 +35,9 @@ public static class MockCli {
         if (mode == "report-proofs-pass") return "commits: abc1234 B1.3: close it\nPROOF-STATIC: pass\nall 12 tests passed\nPROOF-REAL: pass\nsmoke ok\nRESULT: PASS\n";
         if (mode == "report-real-unverified") return "commits: abc1234 B1.3: close it\nPROOF-STATIC: pass\nall 12 tests passed\nPROOF-REAL: not-verified - the sandbox has no browser\nRESULT: PASS\n";
         if (mode == "append-inbox" || mode == "rewrite-inbox") return "closeout steps completed\nRESULT: PASS\n";
+        if (mode == "ask-approval") return "I have drafted the review. Please confirm you want me to proceed with these findings.\n[F1.1] blocking | PLAN.md#D1 | A blocking claim.\n  Scenario: input -> wrong result.\nVERDICT: REVISE\n";
+        if (mode == "ask-question") return "review complete\nVERDICT: APPROVE\nShould I also inspect the tests?\n";
+        if (mode == "report-no-commits") return "no commits were needed\nPROOF-STATIC: pass\nall tests passed\nRESULT: PASS\n";
         return "review complete\nVERDICT: APPROVE\n\n";
     }
 
@@ -142,7 +145,8 @@ public static class MockCli {
         if (mode == "resume-malformed-envelope" && resume && !codex) { Console.Write("truncated-json"); return 0; }
         Sabotage(mode);
         string payload = Payload(mode);
-        string usage = mode == "usage"
+        // XLOOP_MOCK_USAGE=1 adds counts to every mode so a dry-run loop grows a ledger.
+        string usage = (mode == "usage" || Environment.GetEnvironmentVariable("XLOOP_MOCK_USAGE") == "1")
             ? "{\"input_tokens\":1200,\"output_tokens\":340,\"cached_input_tokens\":800}"
             : null;
 

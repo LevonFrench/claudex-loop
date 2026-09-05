@@ -14,6 +14,7 @@
 - [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`.
 - [ ] Run the skill validator and `git diff --check`.
 - [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\ship-check.ps1`. Each line is `OK` or `TODO` with its fix (`committed`, `pushed`, `docs`, `wiki`, `brief`, `handoff`); `TODO pushed` is expected until the branch is pushed, and every other line must be `OK`.
+- [ ] Run `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\test-all.ps1`. It runs the PowerShell suite, the Git Bash suite, doctor, `git diff --check`, and (with `XLOOP_LIVE=1`) the live harness in both driver directions, and prints exactly one final line: `ALL GATES GREEN` is required; `SOME GATES FAILED` names the red gate and its log under `tests/out/`.
 
 ## Peer Sessions plugin
 
@@ -31,42 +32,18 @@
 
 ## Authenticated acceptance
 
-Each gate below is classified. A **blocking** gate must pass before a stable tag; an **advisory** gate is recorded but does not hold the tag.
+The live harness is the gate. It runs a whole loop against a disposable repository with the real CLIs, in both driver directions, and must pass before a stable tag. It is never run in CI.
 
-### Warm wiki (blocking)
+- [ ] Install the skill on this machine (`.\install.ps1`) so `~/.claude/skills/xloop` and `~/.agents/skills/xloop` exist; the drivers invoke the installed skill.
+- [ ] Run `$env:XLOOP_LIVE = '1'; powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\live-loop.ps1 -Author claude` and then `-Author codex`. Each run covers three scenarios (`-Wiki none`, `warm`, `empty`) and, per scenario, seven steps: disposable repository, headless driver start, process-tree kill at review round 3, recap-free resume from disk, hand replay of the last transition (`already_applied`), spent-nudge carry-over, and the finished run (ship check `OK`, first brief present, one wiki log entry, counts-only ledger). Every step prints a `PASS`/`FAIL` line; the script ends with `live-loop: ALL SCENARIOS PASS`.
+- [ ] Copy each run's summary from `tests/out/live-loop-<author>-<wiki>-<stamp>.md` into the "Live acceptance record" table in `docs/RELEASE-NOTES.md`. `tests/out/` is untracked; the notes are the durable record.
+- [ ] Or run everything at once: `$env:XLOOP_LIVE = '1'; .\tests\test-all.ps1` must end with `ALL GATES GREEN`.
 
-- [ ] Run a small, recoverable change through a wiki-warm repository.
-- [ ] Confirm the round-1 reviewer reads its evidence on Windows and does not report unimplemented plan steps as defects.
-- [ ] Complete build, pinned-diff inspection, proof, and wiki closeout.
+What a script cannot see, checked by hand once per release (advisory, recorded but not blocking):
 
-### Empty wiki (blocking)
-
-- [ ] Run against a repository whose wiki exists but has no codebase brief; confirm the packet brief slot is explicit rather than dangling.
-
-### True no-wiki (blocking)
-
-- [ ] Repeat on a disposable sparse/no-wiki repository and verify first-brief creation at closeout.
-
-### Kill and resume (blocking)
-
-- [ ] Kill the driving session between review rounds 2 and 3, then resume from `.loop/` without a human recap.
-- [ ] Confirm a bad resume handle uses the separately rendered fresh packet and records fallback metadata.
-- [ ] Re-run the last `loop-step.ps1` transition after the kill and confirm it reports `already_applied` rather than double-advancing, including an advancing transition such as `review-next-round -ToRound <n>`.
-- [ ] Confirm a spent nudge is still recorded in `STATE.md` after the kill, so the resumed driver escalates instead of granting the same class another retry.
-
-### Contract enforcement (blocking)
-
-- [ ] Confirm malformed findings are preserved and receive exactly one corrective format retry.
-- [ ] Confirm a summoned agent that edits `STATE.md` is restored, reported as `nudge_class: mutation`, and nudged independently of the format budget.
-- [ ] Confirm closeout's wiki-inbox append survives while a rewrite of its existing bytes is rolled back.
-- [ ] Confirm a mistyped evidence path fails the summon with exit `1` instead of running the model without that evidence.
-- [ ] Confirm a findings file ending in `RESULT: PASS`, or a report ending in `VERDICT: APPROVE`, is rejected as malformed for that packet.
-
-### Measurement and ergonomics (advisory)
-
-- [ ] Confirm `.loop/LEDGER.md` accumulates counts-only lines and never prompt or response text.
-- [ ] Confirm a `-Visible` summon shows live output, returns its exit code, leaves no `visible-*` handoff files under `.loop`, and reports no packet violation; confirm `XLOOP_HEADLESS=1` suppresses the window.
-- [ ] Confirm `-Model` reaches the Codex invocation and an invalid identifier is refused.
+- [ ] Open a `-Visible` summon and confirm the transcript streams live in the console window, the exit code still comes back, and `XLOOP_HEADLESS=1` suppresses the window. The harness runs headless and cannot observe a window.
+- [ ] Read one live reviewer findings file and one live inspection file and confirm the findings are about the plan's design, not missing implementation, and that the driver's arbitration in `REVIEW-LOG.md` is defensible. The harness validates shape, not judgement.
+- [ ] Read the first brief the no-wiki scenario wrote and confirm it describes the fixture project rather than boilerplate.
 
 ## Publication
 
@@ -75,4 +52,4 @@ Each gate below is classified. A **blocking** gate must pass before a stable tag
 - [ ] Push the release branch to the public fork.
 - [ ] Wait for Windows CI.
 - [ ] Run `.\scripts\ship-check.ps1` once more on the pushed branch; it must exit `0` at tag time.
-- [ ] Create a stable tag and GitHub release only after both authenticated acceptance loops pass.
+- [ ] Create a stable tag and GitHub release only after the live harness passes in both driver directions and both summaries are recorded in `docs/RELEASE-NOTES.md`.

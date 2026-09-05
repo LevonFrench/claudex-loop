@@ -1685,6 +1685,233 @@ try {
     if ([IO.Directory]::Exists($firedHome)) { [IO.Directory]::Delete($firedHome, $true) }
 }
 # ---- end loop C ----
+# ---- Scope loop D (S4, S10) ----
+# Self-contained: its own temp root, mock CLIs, and xloop home, because every
+# earlier root is gone by now.
+$loopDRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-loop-d-smoke-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($loopDRoot) | Out-Null
+$loopDSavedPath = $env:PATH
+$loopDSavedHome = $env:XLOOP_HOME
+$env:XLOOP_HOME = Join-Path $loopDRoot 'xloop home'
+try {
+    $loopDUtf8 = New-Object Text.UTF8Encoding($false)
+    $common = Join-Path $repo 'skills\xloop\scripts\loop-common.ps1'
+    $initScript = Join-Path $repo 'skills\xloop\scripts\loop-init.ps1'
+    $codexWrapper = Join-Path $repo 'skills\xloop\scripts\loop-codex.ps1'
+    $claudeWrapper = Join-Path $repo 'skills\xloop\scripts\loop-claude.ps1'
+    $liveLoop = Join-Path $repo 'tests\live-loop.ps1'
+    $loopDMockBin = Join-Path $loopDRoot 'mock bin'
+    $loopDMockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $loopDMockBin)
+    Assert-True -Condition ($loopDMockBuild.ExitCode -eq 0) -Message "Loop D mock CLI build failed: $($loopDMockBuild.Output)"
+    $env:PATH = $loopDMockBin + [IO.Path]::PathSeparator + $env:PATH
+    $env:XLOOP_PROBE_ENDPOINT_CLAUDE = 'none'
+    $env:XLOOP_PROBE_ENDPOINT_CODEX = 'none'
+    function Invoke-LoopDGit {
+        param([string]$Root, [string[]]$Arguments)
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = @(& git -c core.autocrlf=false -c core.safecrlf=false -c commit.gpgsign=false -c user.name=smoke -c user.email=smoke@localhost -C $Root @Arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedPreference
+        }
+        $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+        if ($exitCode -ne 0) { throw "git $($Arguments -join ' ') failed in ${Root}: $text" }
+        return $text
+    }
+
+    # S10: schema-over-prose audit. Rule extraction, as documented in PROTOCOL.md
+    # 6.1: drop the trailing `Key: {{token}}` lines, split the rest into sentences
+    # at `.`, `!`, or `?` followed by whitespace, and keep every sentence that
+    # contains one of the whole words must, never, only, or exactly (case-
+    # insensitive). Each such sentence must carry at least one backticked rule
+    # phrase from the 6.1 table; each phrase must appear in at least one template
+    # and at most once per template; each row carries exactly one class.
+    $protocolText = [IO.File]::ReadAllText((Join-Path $repo 'skills\xloop\PROTOCOL.md')).TrimStart([char]0xFEFF)
+    $auditSection = [regex]::Match($protocolText, '(?s)### 6\.1 Template rule audit(.*?)(?:\r?\n## |\z)')
+    Assert-True -Condition ($auditSection.Success) -Message 'PROTOCOL.md has no "### 6.1 Template rule audit" section.'
+    $auditRows = @()
+    foreach ($rowMatch in [regex]::Matches($auditSection.Groups[1].Value, '(?m)^\| (?<id>R\d+) \| (?<class>[a-z]+) \| `(?<rule>[^`]+)` \|')) {
+        $auditRows += [pscustomobject]@{ Id = $rowMatch.Groups['id'].Value; Class = $rowMatch.Groups['class'].Value; Rule = $rowMatch.Groups['rule'].Value }
+    }
+    Assert-True -Condition ($auditRows.Count -ge 30) -Message "The 6.1 audit table has only $($auditRows.Count) rows."
+    $auditIds = @($auditRows | ForEach-Object { $_.Id } | Sort-Object -Unique)
+    Assert-True -Condition ($auditIds.Count -eq $auditRows.Count) -Message 'The 6.1 audit table repeats a rule id.'
+    $auditRules = @($auditRows | ForEach-Object { $_.Rule.ToLowerInvariant() } | Sort-Object -Unique)
+    Assert-True -Condition ($auditRules.Count -eq $auditRows.Count) -Message 'The 6.1 audit table repeats a rule phrase, so a rule is classified twice.'
+    $classCounts = @{ enforced = 0; detected = 0; advisory = 0 }
+    foreach ($row in $auditRows) {
+        Assert-True -Condition ($row.Class -in @('enforced', 'detected', 'advisory')) -Message "Rule $($row.Id) has class '$($row.Class)', not enforced|detected|advisory."
+        $classCounts[$row.Class]++
+    }
+    $templateDirectory = Join-Path $repo 'skills\xloop\templates'
+    $templateTexts = @{}
+    foreach ($templateFile in Get-ChildItem -LiteralPath $templateDirectory -Filter '*.txt' -File) { $templateTexts[$templateFile.Name] = [IO.File]::ReadAllText($templateFile.FullName).TrimStart([char]0xFEFF) }
+    Assert-True -Condition ($templateTexts.Count -eq 8) -Message "Expected eight templates for the audit, found $($templateTexts.Count)."
+    $extractedSentences = 0
+    foreach ($templateName in $templateTexts.Keys) {
+        $body = @($templateTexts[$templateName] -split "`r?`n" | Where-Object { $_ -notmatch '^[A-Za-z ]+: \{\{' }) -join ' '
+        foreach ($sentence in ([regex]::Split($body, '(?<=[.!?])\s+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            if ($sentence -notmatch '(?i)\b(must|never|only|exactly)\b') { continue }
+            $extractedSentences++
+            $classified = $false
+            foreach ($row in $auditRows) {
+                if ($sentence.IndexOf($row.Rule, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $classified = $true; break }
+            }
+            Assert-True -Condition $classified -Message "Template $templateName states a rule that the 6.1 table does not classify: $sentence"
+        }
+    }
+    Assert-True -Condition ($extractedSentences -ge 40) -Message "Rule extraction found only $extractedSentences keyword sentences across the templates."
+    foreach ($row in $auditRows) {
+        $totalHits = 0
+        foreach ($templateName in $templateTexts.Keys) {
+            $hits = [regex]::Matches($templateTexts[$templateName], [regex]::Escape($row.Rule), [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count
+            Assert-True -Condition ($hits -le 1) -Message "Rule $($row.Id) ('$($row.Rule)') is stated $hits times in $templateName; a rule lives in one sentence per packet."
+            $totalHits += $hits
+        }
+        Assert-True -Condition ($totalHits -ge 1) -Message "Rule $($row.Id) ('$($row.Rule)') appears in no template; the 6.1 table carries a dead row."
+    }
+    Assert-True -Condition ($classCounts['enforced'] -ge 8 -and $classCounts['detected'] -ge 6 -and $classCounts['advisory'] -ge 10) -Message "Unexpected class distribution: $($classCounts | ConvertTo-Json -Compress)"
+    # The two detections are named in 6 beside the nudge classes, once each.
+    Assert-True -Condition ($protocolText -match 'ends in a question mark' -and $protocolText -match 'zero commits is not a build') -Message 'PROTOCOL.md 6 does not describe both schema-over-prose detections.'
+
+    # S10 detection (a): a final message that asks a question or requests approval
+    # is exit 2, nudge_class: format, on both wrappers; schema lines that merely
+    # contain a question mark are not conversation.
+    $askProject = Join-Path $loopDRoot 'ask project'
+    [IO.Directory]::CreateDirectory($askProject) | Out-Null
+    $env:XLOOP_MOCK_MODE = 'bom'
+    $askInit = Invoke-ChildPowerShell -Script $initScript -Arguments @('-Project', $askProject, '-Author', 'claude', '-LoopName', 'ask-smoke')
+    Assert-True -Condition ($askInit.ExitCode -eq 0) -Message "Ask-project initialization failed: $($askInit.Output)"
+    [IO.File]::WriteAllText((Join-Path $askProject '.loop\tmp\packet.txt'), 'Read the packet paths and return the required terminator.', $loopDUtf8)
+    foreach ($askCase in @(
+        @{ Tool = 'codex'; Mode = 'ask-approval'; Out = '.loop\rounds\r1-findings.md'; Kind = 'approval-request'; Why = 'an approval request beside a valid REVISE' },
+        @{ Tool = 'claude'; Mode = 'ask-approval'; Out = '.loop\rounds\r2-findings.md'; Kind = 'approval-request'; Why = 'an approval request beside a valid REVISE' },
+        @{ Tool = 'codex'; Mode = 'ask-question'; Out = '.loop\rounds\r3-findings.md'; Kind = 'question'; Why = 'a final message ending in a question mark' },
+        @{ Tool = 'claude'; Mode = 'ask-question'; Out = '.loop\rounds\r4-findings.md'; Kind = 'question'; Why = 'a final message ending in a question mark' }
+    )) {
+        $env:XLOOP_MOCK_MODE = $askCase.Mode
+        $wrapper = if ($askCase.Tool -eq 'codex') { $codexWrapper } else { $claudeWrapper }
+        $askRun = Invoke-ChildPowerShell -Script $wrapper -Arguments @('-Project', $askProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', $askCase.Out, '-TimeoutSec', '5')
+        Assert-True -Condition ($askRun.ExitCode -eq 2) -Message "$($askCase.Tool): $($askCase.Why) returned $($askRun.ExitCode), expected 2: $($askRun.Output)"
+        $askMeta = [IO.File]::ReadAllText((Join-Path $askProject ($askCase.Out + '.meta.json'))) | ConvertFrom-Json
+        Assert-True -Condition ($askMeta.nudge_class -eq 'format') -Message "$($askCase.Tool): $($askCase.Why) was classified as '$($askMeta.nudge_class)', not format."
+        Assert-True -Condition (@($askMeta.detections) -contains $askCase.Kind) -Message "$($askCase.Tool): $($askCase.Why) did not record the $($askCase.Kind) detection: $($askMeta.detections -join ',')"
+        Assert-True -Condition ($askMeta.validation_error -match 'nobody is present') -Message "$($askCase.Tool): the detection reason does not say nobody is present: $($askMeta.validation_error)"
+    }
+    $askFixture = Join-Path $loopDRoot 'ask-fixture.md'
+    [IO.File]::WriteAllText($askFixture, "[F1.1] blocking | PLAN.md#D3 | Is the retry idempotent? No: duplicate rows survive.`n  Scenario: two POSTs with the same key -> what happens on a 429? -> duplicate rows.`nVERDICT: REVISE`n", $loopDUtf8)
+    $askClean = Invoke-ChildCommand -Command (". '$common'; Write-Output ((Get-ApprovalRequestValidation -Path '$askFixture').Detected)")
+    Assert-True -Condition ($askClean.Output -eq 'False') -Message "A question mark inside a finding header or Scenario line was flagged as a question: $($askClean.Output)"
+    [IO.File]::WriteAllText($askFixture, "commits: abc1234`nPROOF-STATIC: pass`nRESULT: PASS`nWould you like me to also update the README?`n", $loopDUtf8)
+    $askTrailing = Invoke-ChildCommand -Command (". '$common'; `$d = Get-ApprovalRequestValidation -Path '$askFixture'; Write-Output ([string]`$d.Detected + '|' + `$d.Kind)")
+    Assert-True -Condition ($askTrailing.Output -eq 'True|question') -Message "A trailing question after the terminator was not detected: $($askTrailing.Output)"
+    [IO.File]::WriteAllText($askFixture, "Awaiting your approval before I commit these changes.`nPROOF-STATIC: pass`nRESULT: PASS`n", $loopDUtf8)
+    $askAwaiting = Invoke-ChildCommand -Command (". '$common'; `$d = Get-ApprovalRequestValidation -Path '$askFixture'; Write-Output ([string]`$d.Detected + '|' + `$d.Kind)")
+    Assert-True -Condition ($askAwaiting.Output -eq 'True|approval-request') -Message "An approval request without a question mark was not detected: $($askAwaiting.Output)"
+
+    # S10 detection (b): a write-mode build report with zero commits since the pin
+    # is exit 2, nudge_class: format; a read-only summon of the same output is not
+    # checked, and one commit clears it.
+    $commitProject = Join-Path $loopDRoot 'commit project'
+    [IO.Directory]::CreateDirectory($commitProject) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $commitProject 'base.txt'), "base`n", $loopDUtf8)
+    [void](Invoke-LoopDGit -Root $commitProject -Arguments @('init', '-q'))
+    [void](Invoke-LoopDGit -Root $commitProject -Arguments @('add', '-A'))
+    [void](Invoke-LoopDGit -Root $commitProject -Arguments @('commit', '-q', '-m', 'initial project'))
+    $env:XLOOP_MOCK_MODE = 'bom'
+    $commitInit = Invoke-ChildPowerShell -Script $initScript -Arguments @('-Project', $commitProject, '-Author', 'claude', '-LoopName', 'commit-smoke')
+    Assert-True -Condition ($commitInit.ExitCode -eq 0) -Message "Commit-project initialization failed: $($commitInit.Output)"
+    $commitStatePath = Join-Path $commitProject '.loop\STATE.md'
+    Assert-True -Condition ([IO.File]::ReadAllText($commitStatePath) -match '(?m)^base_sha: [0-9a-f]{40}\s*$') -Message 'loop-init did not record base_sha in a Git project.'
+    [IO.File]::WriteAllText((Join-Path $commitProject '.loop\tmp\packet.txt'), 'build packet: report the commits.', $loopDUtf8)
+    $env:XLOOP_MOCK_MODE = 'report-no-commits'
+    $noCommitWrite = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $commitProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\build\b1-report.md', '-Sandbox', 'write', '-TimeoutSec', '5')
+    Assert-True -Condition ($noCommitWrite.ExitCode -eq 2) -Message "A write-mode report with zero commits returned $($noCommitWrite.ExitCode), expected 2: $($noCommitWrite.Output)"
+    $noCommitMeta = [IO.File]::ReadAllText((Join-Path $commitProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+    Assert-True -Condition ($noCommitMeta.nudge_class -eq 'format' -and (@($noCommitMeta.detections) -contains 'zero-commits') -and [int]$noCommitMeta.commits_since_pin -eq 0) -Message "The zero-commit report was not classified as a format defect: $($noCommitMeta | ConvertTo-Json -Compress)"
+    Assert-True -Condition ($noCommitMeta.validation_error -match 'committed nothing') -Message "The zero-commit reason is wrong: $($noCommitMeta.validation_error)"
+    $noCommitRead = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $commitProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\build\b1-report.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($noCommitRead.ExitCode -eq 0) -Message "A read-only summon was checked for commits: $($noCommitRead.Output)"
+    $noCommitReadMeta = [IO.File]::ReadAllText((Join-Path $commitProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+    Assert-True -Condition ([int]$noCommitReadMeta.commits_since_pin -eq -1 -and @($noCommitReadMeta.detections).Count -eq 0) -Message 'A read-only summon recorded a commit detection.'
+    $noCommitFindings = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $commitProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\rounds\r1-findings.md', '-Sandbox', 'write', '-TimeoutSec', '5')
+    Assert-True -Condition ($noCommitFindings.ExitCode -eq 2) -Message "A write-mode findings output was not validated as a findings file: $($noCommitFindings.Output)"
+    $noCommitFindingsMeta = [IO.File]::ReadAllText((Join-Path $commitProject '.loop\rounds\r1-findings.md.meta.json')) | ConvertFrom-Json
+    Assert-True -Condition (@($noCommitFindingsMeta.detections).Count -eq 0) -Message 'The commit detection applied to an output that is not a build report.'
+    [IO.File]::WriteAllText((Join-Path $commitProject 'feature.txt'), "feature`n", $loopDUtf8)
+    [void](Invoke-LoopDGit -Root $commitProject -Arguments @('add', '-A'))
+    [void](Invoke-LoopDGit -Root $commitProject -Arguments @('commit', '-q', '-m', 'D1: add the feature'))
+    $env:XLOOP_MOCK_MODE = 'result-pass'
+    $oneCommit = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $commitProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\build\b1-report.md', '-Sandbox', 'write', '-TimeoutSec', '5')
+    Assert-True -Condition ($oneCommit.ExitCode -eq 0) -Message "A write-mode report with one commit was rejected: $($oneCommit.Output)"
+    $oneCommitMeta = [IO.File]::ReadAllText((Join-Path $commitProject '.loop\build\b1-report.md.meta.json')) | ConvertFrom-Json
+    Assert-True -Condition ([int]$oneCommitMeta.commits_since_pin -eq 1 -and @($oneCommitMeta.detections).Count -eq 0) -Message "One commit since the pin was not recorded: $($oneCommitMeta | ConvertTo-Json -Compress)"
+
+    # Regression found by the dry-run harness: a declared append-only file that
+    # exists but is empty (the scaffolded wiki inbox at closeout) must accept a
+    # valid append instead of crashing the guard.
+    $emptyInbox = Join-Path $commitProject '.loop\wiki-inbox.md'
+    [IO.File]::WriteAllText($emptyInbox, '', $loopDUtf8)
+    $env:XLOOP_MOCK_MODE = 'append-inbox'
+    $emptyAppend = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $commitProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\CLOSEOUT-REPORT.md', '-AppendOnlyFile', '.loop\wiki-inbox.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($emptyAppend.ExitCode -eq 0) -Message "An append to an empty declared append-only file was rejected: $($emptyAppend.Output)"
+    Assert-True -Condition ([IO.File]::ReadAllText($emptyInbox) -match 'durable note from closeout') -Message 'The append to an empty inbox did not survive.'
+    Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
+
+    # S4: the live harness is gated and its plumbing is proved offline. Without
+    # XLOOP_LIVE it skips with exit 0; -DryRun runs a whole mock loop per
+    # scenario in both driver directions: repo creation, STATE watching, the
+    # process-tree kill at round 3, the hand replay, the nudge carry-over, the
+    # recap-free resume, and the done assertions, and writes the summary.
+    $savedLive = $env:XLOOP_LIVE
+    Remove-Item Env:XLOOP_LIVE -ErrorAction SilentlyContinue
+    try {
+        $liveSkip = Invoke-ChildPowerShell -Script $liveLoop -Arguments @('-Author', 'claude')
+        Assert-True -Condition ($liveSkip.ExitCode -eq 0 -and $liveSkip.Output -match 'live-loop: skipped') -Message "The live harness did not skip without XLOOP_LIVE: exit $($liveSkip.ExitCode): $($liveSkip.Output)"
+        $liveOut = Join-Path $loopDRoot 'live out'
+        foreach ($dryCase in @(@{ Author = 'claude'; Wiki = 'none' }, @{ Author = 'codex'; Wiki = 'empty' })) {
+            $dry = Invoke-ChildPowerShell -Script $liveLoop -Arguments @('-DryRun', '-Author', $dryCase.Author, '-Wiki', $dryCase.Wiki, '-OutDir', $liveOut)
+            if ($dry.ExitCode -ne 0) {
+                # The temp root is deleted on the way out, so the driver transcripts
+                # travel in the failure message.
+                $driverLogs = @(Get-ChildItem -LiteralPath (Join-Path $liveOut ('work\' + $dryCase.Author + '-' + $dryCase.Wiki)) -Filter 'driver-*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { '--- ' + $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName) })
+                Assert-True -Condition $false -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) failed: exit $($dry.ExitCode): $($dry.Output)`n$($driverLogs -join "`n")"
+            }
+            Assert-True -Condition ($dry.Output -match 'live-loop: ALL SCENARIOS PASS') -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) did not report ALL SCENARIOS PASS: $($dry.Output)"
+            foreach ($stepNumber in 1..7) {
+                Assert-True -Condition ($dry.Output -match ('(?m)^PASS step ' + $stepNumber + ':')) -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) did not print PASS for step ${stepNumber}: $($dry.Output)"
+            }
+            $summaries = @(Get-ChildItem -LiteralPath $liveOut -Filter ('live-loop-' + $dryCase.Author + '-' + $dryCase.Wiki + '-*.md') -File)
+            Assert-True -Condition ($summaries.Count -eq 1) -Message "Expected one summary for $($dryCase.Author)/$($dryCase.Wiki), found $($summaries.Count)."
+            $summaryText = [IO.File]::ReadAllText($summaries[0].FullName)
+            Assert-True -Condition ($summaryText -match '(?m)^- result: PASS \(0 failed of 7 steps\)\s*$' -and $summaryText -match '(?m)^- mode: dry-run\s*$' -and (@([regex]::Matches($summaryText, '(?m)^\| \d \| PASS \|')).Count -eq 7)) -Message "The summary file is not seven PASS rows: $summaryText"
+            Assert-True -Condition (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($summaries[0].FullName, '.json'))) -Message 'The summary has no JSON twin.'
+            $dryRepo = Join-Path $liveOut ('work\' + $dryCase.Author + '-' + $dryCase.Wiki + '\repo')
+            $dryState = [IO.File]::ReadAllText((Join-Path $dryRepo '.loop\STATE.md'))
+            Assert-True -Condition ($dryState -match '(?m)^phase: done\s*$' -and $dryState -match '(?m)^author: ' + $dryCase.Author + '\s*$' -and $dryState -match '(?m)^ship_check: \d{4}-') -Message "The dry-run loop did not finish as $($dryCase.Author) with a recorded ship check: $dryState"
+            Assert-True -Condition (Test-Path -LiteralPath (Join-Path $dryRepo '.wiki\wiki\references\codebase-brief.md')) -Message 'The dry-run loop did not leave a brief.'
+            Assert-True -Condition ((Get-ChildItem -LiteralPath (Join-Path $liveOut ('work\' + $dryCase.Author + '-' + $dryCase.Wiki)) -Filter 'driver-*.stdout.log' -File).Count -eq 2) -Message 'The dry-run harness did not keep both driver transcripts.'
+        }
+        # Dry runs never claim the live mechanism fired, and every registration
+        # they cause lands in the harness's own throwaway home.
+        Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $env:XLOOP_HOME 'fired.json')) -or ([IO.File]::ReadAllText((Join-Path $env:XLOOP_HOME 'fired.json')) -notmatch '"live-harness"')) -Message 'A dry run registered live-harness as fired.'
+        $dryHomes = @(Get-ChildItem -LiteralPath (Join-Path $liveOut 'work') -Filter 'xloop-home-*' -Directory)
+        Assert-True -Condition ($dryHomes.Count -ge 1 -and (Test-Path -LiteralPath (Join-Path $dryHomes[0].FullName 'fired.json'))) -Message 'The dry-run harness did not redirect the fired record to its own home.'
+        Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $dryHomes[0].FullName 'fired.json')) -notmatch '"live-harness"') -Message 'The dry-run home records live-harness as fired.'
+    } finally {
+        if ($null -ne $savedLive) { $env:XLOOP_LIVE = $savedLive }
+    }
+} finally {
+    $env:PATH = $loopDSavedPath
+    Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:XLOOP_PROBE_ENDPOINT_CLAUDE -ErrorAction SilentlyContinue
+    Remove-Item Env:XLOOP_PROBE_ENDPOINT_CODEX -ErrorAction SilentlyContinue
+    if ($null -eq $loopDSavedHome) { Remove-Item Env:XLOOP_HOME -ErrorAction SilentlyContinue } else { $env:XLOOP_HOME = $loopDSavedHome }
+    if ([IO.Directory]::Exists($loopDRoot)) { Remove-Item -LiteralPath $loopDRoot -Recurse -Force -ErrorAction SilentlyContinue }
+}
+# ---- end loop D ----
 
 Write-Output 'Offline PowerShell 5.1 smoke tests passed.'
 exit 0
