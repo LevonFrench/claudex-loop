@@ -6,7 +6,12 @@ param(
 
     # Per-machine fired record (protocol §3.10): which xloop mechanisms have ever
     # run here. Needs no project.
-    [switch]$Fired
+    [switch]$Fired,
+
+    # Closeout promotion list (protocol §3.6, §3.8): user_right corrections and
+    # overridden recommendations from QUESTIONS.md as [user-ruling], plus the
+    # closing rating from RATING.md as [rating]. Clerical: reads, never rules.
+    [switch]$Corrections
 )
 
 Set-StrictMode -Version 2.0
@@ -80,6 +85,39 @@ function Get-NextPacket {
         'escalated'   { return 'STATE.md, QUESTIONS.md, REVIEW-LOG.md' }
         'done'        { return 'STATE.md, REVIEW-LOG.md' }
         default       { return 'STATE.md' }
+    }
+}
+
+if ($Corrections) {
+    try {
+        $root = Get-LoopProjectRoot -Project $Project
+        $loopRoot = Join-Path $root '.loop'
+        $promotions = Get-LoopCorrectionPromotions -QuestionsPath (Join-Path $loopRoot 'QUESTIONS.md') -RatingPath (Join-Path $loopRoot 'RATING.md')
+        if ($AsJson) {
+            [ordered]@{ lessons = @($promotions.Lessons); dropped = @($promotions.Dropped); rating = $promotions.Rating } | ConvertTo-Json -Depth 4 -Compress
+        } else {
+            Write-Output ('Lesson promotions from QUESTIONS.md: {0}' -f @($promotions.Lessons).Count)
+            foreach ($lesson in $promotions.Lessons) {
+                if ($lesson['kind'] -eq 'correction') {
+                    Write-Output ('- {0} correction [{1}]: {2} | ruling: {3} | evidence: {4}' -f $lesson['tag'], $lesson['source'], $lesson['text'], $lesson['ruling'], $lesson['evidence'])
+                } else {
+                    Write-Output ('- {0} override: {1} | recommended: {2} | user: {3}' -f $lesson['tag'], $lesson['text'], $lesson['recommended'], $lesson['ruling'])
+                }
+            }
+            foreach ($drop in $promotions.Dropped) {
+                Write-Output ('- dropped ({0}): Correction [{1}]: {2}' -f $drop['reason'], $drop['source'], $drop['text'])
+            }
+            if ($null -ne $promotions.Rating) {
+                $feedback = if ($promotions.Rating['feedback']) { ' | feedback: ' + $promotions.Rating['feedback'] } else { '' }
+                Write-Output ('- [rating] {0}/5{1}' -f $promotions.Rating['rating'], $feedback)
+            } else {
+                Write-Output '- no closing rating recorded (skipped ratings write nothing)'
+            }
+        }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
     }
 }
 

@@ -10,7 +10,7 @@ Pass `-AppendOnlyFile` for `.loop/wiki-inbox.md` so the required inbox append su
 
 1. At `closeout_step: brief`, patch only codebase-brief sections touched by the loop's final diff. Set `verified-against` to final `pinned_sha` and update `covers` when necessary. Never regenerate an existing brief.
 2. Add plan Decision rows and review-settled user rulings to the wiki's settled-decisions article without duplicating existing IDs.
-3. Write accepted blockers and real proof failures to `raw/notes/YYYY-MM-DD-ll-<slug>.md` with `lesson_kind: lessons-learned`.
+3. Write accepted blockers and real proof failures to `raw/notes/YYYY-MM-DD-ll-<slug>.md` with `lesson_kind: lessons-learned`, and promote the user's rulings into the same note (protocol §3.8): every `user_right` correction record in `.loop/QUESTIONS.md` and every question whose `Answer:` overrode `Recommended:` becomes one `[user-ruling]` line carrying the recommendation and the ruling side by side. `agent_right`, `unresolved`, and any record without an `Evidence:` line promote nothing. The list is clerical: run `scripts/loop-status.ps1 -Project <project> -Corrections` before this step and promote exactly what it prints.
 4. Promote `.loop/wiki-inbox.md` entries and Codex inbox drops to the appropriate compiled articles.
 5. Append one line to wiki `log.md`: `## [date] loop | <slug>: approved r<N>, built @<sha>, brief re-anchored`.
 
@@ -33,3 +33,13 @@ updated: <now>
 ```
 
 Give the user at most 10 lines: verdict, review/fix rounds, final commits and pinned SHA, proof result, wiki articles changed, and any degraded inbox work. Link to artifacts rather than reproducing them.
+
+## Closing rating
+
+After `phase: done`, ask exactly one batched question and nothing else:
+
+```text
+Rate this run 1-5 (Default-if-silent: skip). A rating of 3 or lower: add one Feedback: line.
+```
+
+On a reply, record it with `scripts/loop-step.ps1 -Transition record-rating -Rating <n> [-Feedback "<line>"]`, which writes `.loop/RATING.md`, then append `[rating] <n>/5` (with the feedback text when present) to this loop's lesson note in `raw/notes/`; Codex may append to raw notes under protocol §3.8, and `loop-status.ps1 -Corrections` shows the recorded rating beside the ruling promotions. On silence or `skip`, write nothing and ask nothing further.

@@ -34,6 +34,8 @@ At `build_step: fix` for round N, render `templates/fix.txt` with the contract, 
 
 Allow at most two fix rounds. On exhaustion, the author may implement only accepted remaining findings and must record the role exception in `REVIEW-LOG.md`; then repin, run proof, and inspect against the generated incremental diff. Unresolved disputed blockers set `phase: escalated`, `escalation_kind: build`, and `build_step: awaiting-user`, then go to one user batch in `.loop/QUESTIONS.md`: every disputed ID carries both positions, the driver's `Recommended:` ruling, and a `Default-if-silent:`, and the batch ends with one line offering `defaults`, per-ID overrides, or `abort`. Display it once and accept one reply; never relay blockers one at a time. A cold resume routes back to this playbook.
 
+Write each answer as an `Answer:` line beside its `Recommended:` line; an override is promoted at closeout as a `[user-ruling]` lesson. When the user corrects the driver during build (what the builder was told, what "visible" or "clean" means, what the proof covers), settle it by checking the contract, the diff, or a command, then record it with `scripts/loop-step.ps1 -Transition record-correction -Correction "<words>" -Ruling <ruling> -Evidence "<command or file>"` (protocol §3.6). The record names the build round; a ruling without evidence is refused.
+
 ## Transition
 
 Proof must pass and inspection must end in validated `APPROVE` with no open blocking IDs. Set `phase: closeout`, `build_step: complete`, `closeout_step: brief`, keep the final `pinned_sha`, refresh the lock and timestamp, then load `closeout.md`.

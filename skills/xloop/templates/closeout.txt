@@ -1,4 +1,6 @@
-Perform idempotent mechanical wiki closeout. Read the protocol, state, approved plan, settled ledger, wiki inbox, final diff, builder report, and brief target at these paths. Resume from closeout_step; upsert by loop ID and pinned SHA. Write compiled wiki content only as Claude. Record completed steps and the terminal RESULT in the report; do not redesign.
+Perform idempotent mechanical wiki closeout. Read the protocol, state, approved plan, settled ledger, question batch, wiki inbox, final diff, builder report, and brief target at these paths. Resume from closeout_step; upsert by loop ID and pinned SHA. Write compiled wiki content only as Claude. Record completed steps and the terminal RESULT in the report; do not redesign.
+
+In the lessons step, promote the user's rulings from the question batch exactly as protocol section 3.8 defines: each Correction record ruled user_right that carries an Evidence line, and each question whose Answer overrode Recommended, becomes one [user-ruling] line with the recommendation and the ruling side by side; agent_right, unresolved, and any record without Evidence promote nothing. Copy no other question text.
 
 Your final message is stored verbatim as the output path: it must contain only the artifact, with no preamble, tooling discussion, or code fence. Nobody is present, so never ask for approval, permission, or clarification; if you cannot write files, that is expected, and your final message is still the artifact. Write freely under the wiki root. Under .loop nothing but the output path may change, except append-only additions to the wiki inbox: you may add lines to it but must never rewrite or remove its existing bytes. STATE, PROTOCOL, PLAN, REVIEW-LOG, REQUEST, ASSUMPTIONS, QUESTIONS, the diff, and the builder report are immutable here; any edit to them is restored and costs the round. Never update loop state yourself, even to record a step you completed.
 
@@ -8,6 +10,7 @@ Protocol: {{protocol_path}}
 State: {{state_path}}
 Plan: {{plan_path}}
 Ledger: {{review_log_path}}
+Questions: {{questions_path}}
 Inbox: {{wiki_inbox_path}}
 Diff: {{diff_path}}
 Report: {{report_path}}

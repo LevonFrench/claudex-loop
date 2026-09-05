@@ -939,6 +939,131 @@ function Invoke-VisibleProcess {
     }
 }
 
+function Get-LoopRecommendedChoice {
+    # `Recommended: <option> because <reason>` -> the option; the reason is prose.
+    param([AllowEmptyString()][string]$Value)
+
+    $choice = [regex]::Split($Value, '(?i)\s+because\s+')[0]
+    return $choice.Trim().TrimEnd('.').Trim()
+}
+
+function Test-LoopAnswerOverridesRecommendation {
+    <#
+    An answer overrides the recommendation when it names a different choice. The
+    comparison is clerical: exact option text, or the option's leading token
+    (`B` for `B (skip)`), or the batch words `defaults`/`default`/`recommended`,
+    all count as accepting the recommendation.
+    #>
+    param([AllowEmptyString()][string]$Recommended, [AllowEmptyString()][string]$Answer)
+
+    $choice = Get-LoopRecommendedChoice -Value $Recommended
+    $reply = $Answer.Trim().TrimEnd('.').Trim()
+    if ([string]::IsNullOrWhiteSpace($choice) -or [string]::IsNullOrWhiteSpace($reply)) { return $false }
+    if ($reply -in @('defaults', 'default', 'recommended')) { return $false }
+    if ($reply.Equals($choice, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $choiceToken = ($choice -split '\s+')[0].TrimEnd(':', ')', ',')
+    $replyToken = ($reply -split '\s+')[0].TrimEnd(':', ')', ',')
+    if ($choiceToken -and $replyToken -and $replyToken.Equals($choiceToken, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $true
+}
+
+function Get-LoopCorrectionPromotions {
+    <#
+    Clerical derivation of the closeout promotion list from QUESTIONS.md and
+    RATING.md (protocol §3.6, §3.8). Promoted as [user-ruling]: every correction
+    record ruled user_right that carries an Evidence line, and every question
+    whose Answer overrides its Recommended choice. Promoted as [rating]: a
+    recorded closing rating. A ruling without evidence is malformed: it is listed
+    under Dropped and never promoted. agent_right and unresolved rulings promote
+    nothing. This function reads only; it never decides a ruling.
+    #>
+    param([string]$QuestionsPath, [string]$RatingPath = '')
+
+    $lessons = New-Object System.Collections.ArrayList
+    $dropped = New-Object System.Collections.ArrayList
+    $rating = $null
+
+    if ($QuestionsPath -and [System.IO.File]::Exists($QuestionsPath)) {
+        $lines = @([System.IO.File]::ReadAllText($QuestionsPath).TrimStart([char]0xFEFF) -split "`r?`n")
+        $question = $null
+        $flushQuestion = {
+            if ($null -ne $question -and $question.Recommended -and $question.Answer -and (Test-LoopAnswerOverridesRecommendation -Recommended $question.Recommended -Answer $question.Answer)) {
+                [void]$lessons.Add([ordered]@{
+                    tag = '[user-ruling]'
+                    kind = 'override'
+                    source = 'Q'
+                    text = $question.Text
+                    recommended = (Get-LoopRecommendedChoice -Value $question.Recommended)
+                    ruling = $question.Answer
+                    evidence = ''
+                })
+            }
+        }
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            $correction = [regex]::Match($line, '^Correction \[(?<where>[^\]]+)\]:\s*(?<words>\S.*)$')
+            if ($correction.Success) {
+                & $flushQuestion
+                $question = $null
+                $rulingValue = ''
+                $evidenceValue = ''
+                $cursor = $i + 1
+                while ($cursor -lt $lines.Count -and [string]::IsNullOrWhiteSpace($lines[$cursor])) { $cursor++ }
+                if ($cursor -lt $lines.Count -and $lines[$cursor] -match '^Ruling:\s*(?<ruling>\S.*)$') {
+                    $rulingValue = $Matches['ruling'].Trim()
+                    $cursor++
+                    while ($cursor -lt $lines.Count -and [string]::IsNullOrWhiteSpace($lines[$cursor])) { $cursor++ }
+                    if ($cursor -lt $lines.Count -and $lines[$cursor] -match '^Evidence:\s*(?<evidence>\S.*)$') { $evidenceValue = $Matches['evidence'].Trim() }
+                }
+                $entry = [ordered]@{
+                    tag = '[user-ruling]'
+                    kind = 'correction'
+                    source = $correction.Groups['where'].Value
+                    text = $correction.Groups['words'].Value.Trim()
+                    recommended = ''
+                    ruling = $rulingValue
+                    evidence = $evidenceValue
+                }
+                if ($rulingValue -notin @('user_right', 'agent_right', 'unresolved')) {
+                    $entry['reason'] = 'malformed ruling'
+                    [void]$dropped.Add($entry)
+                } elseif (-not $evidenceValue) {
+                    $entry['reason'] = 'ruling without Evidence'
+                    [void]$dropped.Add($entry)
+                } elseif ($rulingValue -eq 'user_right') {
+                    [void]$lessons.Add($entry)
+                }
+                continue
+            }
+            if ($line -match '^Q:\s*(?<text>\S.*)$') {
+                & $flushQuestion
+                $question = [pscustomobject]@{ Text = $Matches['text'].Trim(); Recommended = ''; Answer = '' }
+                continue
+            }
+            if ($null -eq $question) { continue }
+            if ($line -match '^Recommended:\s*(?<value>\S.*)$') { $question.Recommended = $Matches['value'].Trim(); continue }
+            if ($line -match '^Answer:\s*(?<value>\S.*)$') { $question.Answer = $Matches['value'].Trim(); continue }
+        }
+        & $flushQuestion
+    }
+
+    if ($RatingPath -and [System.IO.File]::Exists($RatingPath)) {
+        $ratingText = [System.IO.File]::ReadAllText($RatingPath).TrimStart([char]0xFEFF)
+        $ratingMatch = [regex]::Match($ratingText, '(?m)^Rating:\s*([1-5])\s*$')
+        if ($ratingMatch.Success) {
+            $feedbackMatch = [regex]::Match($ratingText, '(?m)^Feedback:\s*(\S.*)$')
+            $rating = [ordered]@{
+                tag = '[rating]'
+                kind = 'rating'
+                rating = [int]$ratingMatch.Groups[1].Value
+                feedback = if ($feedbackMatch.Success) { $feedbackMatch.Groups[1].Value.Trim() } else { '' }
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Lessons = @($lessons); Dropped = @($dropped); Rating = $rating }
+}
+
 function Get-XloopHome {
     <#
     Per-machine xloop bookkeeping lives under the user profile, never under a

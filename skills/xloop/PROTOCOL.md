@@ -33,6 +33,7 @@ The Codex write flag is a locked user decision. Installers copy it unchanged and
   build/b1-report.md
   build/b1-inspect.md
   CLOSEOUT-REPORT.md
+  RATING.md
   LEDGER.md
   tmp/
   tmp/quarantine/
@@ -167,6 +168,20 @@ A `(format-salvaged)` round is one whose findings file stayed malformed after th
 
 `QUESTIONS.md` is one batch. Each load-bearing entry has four fields: `Q`, `why load-bearing`, `options`, `default-if-silent`, plus `recommended`, the driver's own choice with a one-sentence reason. Follow with one cosmetic mini-batch and a read-only `Pre-settled from wiki (say so to reopen)` list. Escalation batches (round-5 review, build `awaiting-user`, the dirty-tree gate, the fix cap) use the same five fields per item, end with one line offering `defaults`, per-ID overrides, or `abort`, and are displayed once for a single reply. Authorization is never a question: invoking the loop already authorizes summoning the other agent, sending it packet paths and cited project context, and letting the builder write and commit inside the project.
 
+Every question keeps its `Answer:` or `Default applied:` line beside its `Recommended:` line; an `Answer:` that names a different choice than the recommendation is a user override and is promoted at closeout (§3.8).
+
+`QUESTIONS.md` also holds correction records, appended whenever the user corrects the driver in any phase:
+
+```text
+Correction [<phase>/<round>]: <the user's words>
+Ruling: user_right | agent_right | unresolved
+Evidence: <command or file that settled it>
+```
+
+The driver settles a correction by checking, never from memory of the exchange, and records it with `loop-step.ps1 -Transition record-correction -Correction <words> -Ruling <ruling> -Evidence <command or file>`, which validates the three lines and appends the record once. `unresolved` is the cheapest verdict and promotes nothing. A ruling without an `Evidence:` line is malformed: the transition refuses it, and closeout drops any such record found in the file rather than promoting it.
+
+The closing rating is the one question asked after `phase: done`: rate the run 1 to 5, `Default-if-silent: skip`; a rating of 3 or lower carries one free-text `Feedback:` line. `loop-step.ps1 -Transition record-rating -Rating <1-5> [-Feedback <line>]` writes `.loop/RATING.md` as `Rating: <n>` plus the optional `Feedback:` line. A skipped rating writes nothing and nothing else is asked.
+
 ### 3.7 Build artifacts
 
 `build/CONTRACT.md` contains:
@@ -187,6 +202,8 @@ For round 1, the driver writes `build/b1.diff` with a stat header followed by th
 ### 3.8 Wiki artifacts
 
 `.loop/wiki-inbox.md` is append-only durable knowledge noticed by either agent. Codex may also write dated `raw/notes/`, append `log.md`, or drop files under `<wiki>/inbox/`; it never edits compiled `wiki/` or `_index.md`. Only Claude promotes compiled articles.
+
+The loop's lesson note `raw/notes/YYYY-MM-DD-ll-<slug>.md` (`lesson_kind: lessons-learned`) holds accepted blockers and real proof failures, and closeout also promotes the user's rulings into it: every `user_right` correction record and every question whose `Answer:` overrode `Recommended:` becomes one line tagged `[user-ruling]` with the recommendation and the ruling side by side, for example `[user-ruling] Q: <question> | recommended: A | user: B` or `[user-ruling] Correction [<phase>/<round>]: <words> | evidence: <command or file>`. `agent_right` and `unresolved` rulings and any record without evidence promote nothing. `loop-status.ps1 -Corrections` derives this list clerically; closeout must promote exactly that list. A recorded closing rating is appended to the same note as `[rating] <n>/5` with its `Feedback:` text when present; a skipped rating adds nothing.
 
 ### 3.9 Packet mutation policy
 
