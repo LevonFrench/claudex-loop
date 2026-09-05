@@ -67,9 +67,12 @@ base_sha: 3f9c2ab
 pinned_sha: 8d1e440
 previous_pinned_sha:
 proof_cmd: npm test
+proof_real: npm run smoke:cli
 verdict: REVISE
 open: F2.1,F2.4
 settled: D1,D2,F1.2,F1.5
+fix_coverage: B1.3,B1.5
+fix_uncovered: B1.4
 format_nudged:
 mutation_nudged: 1
 lock: claude <pid> <ISO-8601>
@@ -78,7 +81,9 @@ updated: <ISO-8601>
 max_nudges: 1
 ```
 
-Valid phases: `recon|interrogate|review|build|closeout|done|escalated`. Valid agents: `claude|codex`. `build_step` is blank outside build and one of `summon|pin|inspect|fix|awaiting-user|complete`; `build_round` starts at 1 for the initial build and increments for each fix attempt, so two fix rounds end at 3. At `fix` round N, the input is `b<N-1>-inspect.md` and the output is `b<N>-report.md`; a valid report advances to `pin`, which creates `b<N>.diff`, then `inspect` creates `b<N>-inspect.md`. `escalation_kind` is `review|build`. `closeout_step` is blank before closeout and one of `brief|decisions|lessons|inbox|log|complete`. A lock newer than 30 minutes blocks a second driver. These fields and roles identify the exact next packet. `codex_thread` and `claude_session` are optional optimizations. Append failed-resume labels such as `r3` to `resume_fallback`.
+Valid phases: `recon|interrogate|review|build|closeout|done|escalated`. Valid agents: `claude|codex`. `build_step` is blank outside build and one of `summon|pin|inspect|fix|report-only|awaiting-user|complete`; `build_round` starts at 1 for the initial build and increments for each fix attempt, so two fix rounds end at 3. At `fix` round N, the input is `b<N-1>-inspect.md` and the output is `b<N>-report.md`; a valid report advances to `pin`, which creates `b<N>.diff`, then `inspect` creates `b<N>-inspect.md`. `report-only` is the recovery step after a write-mode timeout that left commits but no report (§4); it reuses the current round's report path. `escalation_kind` is `review|build`. `closeout_step` is blank before closeout and one of `brief|decisions|lessons|inbox|log|complete`. A lock newer than 30 minutes blocks a second driver. These fields and roles identify the exact next packet. `codex_thread` and `claude_session` are optional optimizations. Append failed-resume labels such as `r3` to `resume_fallback`.
+
+`proof_cmd` is the static proof and `proof_real` the real-path proof (§3.7): one command, or `none — <reason>`; both are recorded at interrogate and both must be set before `review-approve`. `open` holds finding IDs and may also carry the marker `PROOF-REAL`, which `build-pin` adds clerically when the contract declares a real proof command that the round's report left `not-verified`, and removes when a later report passes it; `build-complete` refuses while it stands. `fix_coverage` and `fix_uncovered` are written by `build-inspect` from the commit subjects in the pinned range against the open IDs (§3.7); both are blank when nothing is open.
 
 `format_nudged` and `mutation_nudged` are the durable nudge budgets for the current step, each capped by `max_nudges` (default 1) and cleared by every real advance. A nudge is spent in STATE before the retry is summoned, so a cleared conversation cannot grant the same class a second retry: a class whose counter already equals `max_nudges` escalates instead of retrying.
 
@@ -99,6 +104,7 @@ Rejected: ...
 Why: ...
 ## T. Toolchain
 Proof: <command>
+Proof-real: <command> | none — <reason>
 ## S. Assumptions
 ## R. Risks
 ## N. Non-goals
@@ -176,11 +182,23 @@ GOAL: <PLAN §G>
 SPEC: .loop/PLAN.md
 KEY PATHS: <brief hot files and plan paths>
 CONSTRAINTS: <PLAN §D and §N>
-PROOF: <STATE proof_cmd>
+PROOF-STATIC: <STATE proof_cmd>
+PROOF-REAL: <STATE proof_real: one command that exercises the user-visible path> | none — <reason from PLAN §T>
 OUTPUT: small commits; build/b<N>-report.md
 ```
 
-The report lists commits, `diff --stat`, and at most 50 proof-output lines. Its final non-blank line is `RESULT: PASS` or `RESULT: FAIL`.
+The two proof lines are evidence rungs: the static proof is the harness, the real proof is the path the user takes. `none` is a recorded exemption with its reason, never a silence.
+
+The report lists commits, `diff --stat`, then one status line per declared proof followed by that proof's bounded tail (at most 50 lines):
+
+```text
+PROOF-STATIC: pass | fail | not-verified — <reason>
+PROOF-REAL: pass | fail | not-verified — <reason>
+```
+
+Its final non-blank line is `RESULT: PASS` or `RESULT: FAIL`. The wrapper validates a `b<N>-report.md` against `build/CONTRACT.md`: a report missing the status line for a proof the contract declares as a command is exit `2`, `nudge_class: format`, and `not-verified` without a reason is the same defect. A contract that declares `PROOF-REAL: none` asks nothing of the report there. A report may never claim a rung it did not exercise; a blocked real proof blocks only itself, and the static proof and diff inspection still run and are reported.
+
+Fix-round commit subjects begin with the finding ID they close, for example `B1.3: reject duplicate keys during a 429 storm`; several IDs may precede the colon. Each accepted blocker lands a regression case in the proof harness or the report carries `No regression case for B1.3: <reason>`. At `build-inspect` the driver computes coverage clerically from `git -C <project> log --format=%s <previous_pinned_sha>..<pinned_sha>` against the open IDs and records `fix_coverage` and `fix_uncovered` in STATE; the inspection packet cites both lists. For the initial build the subject convention is optional.
 
 For round 1, the driver writes `build/b1.diff` with a stat header followed by the full diff for `<base_sha>..<pinned_sha>`. Fix-round diffs are incremental: `<previous-pinned>..<new-pinned>`. Every diff command disables repository-configured helpers with `-c diff.external= --no-ext-diff --no-textconv`. The inspector reads the generated file, not the live tree.
 
@@ -216,10 +234,15 @@ Prompts contain only fixed instructions, paths, and the round number.
 - Fresh fallback for round N: use the round-1 full-plan packet plus current state/log; the packet must not depend on session memory.
 - Build: protocol, state, contract, plan path, brief, report path.
 - Fix: protocol, state, contract, current inspect path, report path.
-- Inspection: protocol, state, plan, brief, generated diff, builder report, inspect output path.
-- Closeout: protocol, state, plan, review log, wiki inbox, brief, diff/report paths, wiki root.
+- Report-only: protocol, state, contract, the commit range `<pinned_sha>..HEAD`, report path. The commits already exist; the builder runs the proofs and writes the report only.
+- Inspection: protocol, state, plan, brief, generated diff, builder report, the `fix_coverage` and `fix_uncovered` lists, inspect output path.
+- Closeout: protocol, state, plan, review log, wiki inbox, brief, diff/report paths, the commit subjects of the pinned range, wiki root.
 
 Build is checkpointed after every durable action. `build_step: summon` selects the initial `b1-report` packet; `fix` selects prior inspection `b<N-1>-inspect` and current report `b<N>-report`; a valid builder report advances to `pin`; `pin` records HEAD in `pinned_sha` and the prior value in `previous_pinned_sha`, generates `b<N>.diff`, and advances to `inspect`; `inspect` creates `b<N>-inspect`; `awaiting-user` routes a capped/disputed build escalation. Update STATE last. Closeout similarly advances `closeout_step` after each idempotent upsert and writes `CLOSEOUT-REPORT.md` ending `RESULT: PASS|FAIL`.
+
+A write-mode summon that exits `3` after committing is recovered, not repeated. `loop-step.ps1 -Transition build-report-only` is allowed only when the round's summon metadata records exit `3` in write mode and `git -C <project> log <pinned_sha>..HEAD` (or `<base_sha>..HEAD` before the first pin) is non-empty; it sets `build_step: report-only` and returns the commit range, which the driver renders into `templates/report.txt`. A valid report then advances to `pin` as usual. With no commits the transition is refused and the driver runs a fresh build or fix summon.
+
+Write-mode timeouts are liveness-based. The hard cap (`-TimeoutSec`) is absolute. A shorter soft cap (`-SoftTimeoutSec`, default 300) is re-armed by every sign of life the wrapper can see: bytes on the summoned process's stdout or stderr, a new commit, or a change in `git status --porcelain`. A builder that is slow but working is not killed for being slow; one that has gone quiet is stopped at the soft cap and the metadata records `timeout_kind: soft|hard`. Read-only summons keep the single hard cap.
 
 The wrapper attempts resume. For delta-only resumed reviews, the driver renders both the delta prompt and a self-sufficient full-plan prompt, passing the latter as `-FreshPromptFile`. Read-only resume failures fall back once to that corresponding fresh packet and record the round in `resume_fallback`. In write mode, automatic fallback is allowed only for a recognized invalid/expired handle or sandbox-switch refusal that occurs before the agent turn; any other failure returns `1` so the driver checks HEAD, worktree status, and report state before deciding whether a fresh builder is safe. Build/fix packets may reuse the same self-sufficient prompt. A summoned agent writes only its output path and does not update state.
 
@@ -249,6 +272,9 @@ At recon, compare the brief's `verified-against` SHA with HEAD. Map `git diff --
 - A summon is watchable when a real console is attached, when `-Visible` is passed, or when `XLOOP_VISIBLE=1` is set; it is headless whenever a driver or CI is capturing the streams, or `-Headless`/`XLOOP_HEADLESS=1` is used. A watchable summon streams the transcript live, hands its exit code back through durable files, and deletes that handoff material afterwards.
 - Clerical work belongs to `loop-render.ps1` and `loop-step.ps1`: strict placeholder rendering and named idempotent state transitions. Neither reads findings, arbitrates, nor invokes a model, and the driver still owns every decision. An advancing transition names its target (`-ToRound`, `-ToBuildRound`, `-ToCloseoutStep`, `-Attempt`), so replaying it after a crash reports `already_applied` instead of advancing again, and values written by the same call (such as `-PinnedSha` with `build-inspect`) satisfy that call's own prerequisites.
 - Agent executables are resolved to canonical absolute paths and validated with a bounded `--version` probe, so the summon launches the binary that was checked and a hanging probe cannot outlive discovery.
+- Before every summon the wrapper runs a bounded, token-free reachability probe for the selected provider from its own process context, the one the summon inherits: one TCP connect to the provider endpoint (`XLOOP_PROBE_ENDPOINT_CLAUDE|CODEX` overrides `host:port`; `none` skips it) and, when `XLOOP_PROBE_ARGS_CLAUDE|CODEX` names token-free CLI arguments, one bounded CLI call. Only an actual refused connection is conclusive: the wrapper returns exit `1` with `failure_class: provider-unreachable` and a remediation hint naming the process context (`captured-child`, meaning a driver, sandbox, or CI owns the streams, versus `visible-console`), spends no nudge, and changes no packet file. DNS failures, timeouts, and other errors are inconclusive and the summon proceeds. The probe result is recorded in the summon metadata as `provider_probe`, and `scripts/doctor.ps1` runs the same probe.
+- Wrapper failure classes, recorded as `failure_class` in the metadata: `provider-unreachable` (refused connection before or during the summon), `quota` (one provider exhausted; failover attempted unless disabled), `quota-exhausted` (both providers), `timeout` (exit `3`, with `timeout_kind: soft|hard`), `failover-tool-failure` (the alternate provider failed), and `tool-failure` (everything else). Only `quota` crosses the provider boundary.
+- Build completion is gated on evidence rungs (§3.7): `APPROVE` is invalid while `PROOF-REAL` is `not-verified` unless the contract declared `none`, and `loop-step.ps1 -Transition build-complete` refuses while `open` carries `PROOF-REAL`.
 - Round 5 `REVISE` escalates surviving blockers and both positions as one §3.6 batch with a recommended ruling and default per item. There is no round 6.
 - Build begins only after review approval, a configured proof command, clean `git -C <project> status -sb`, and HEAD exactly equal to `base_sha`. For dirt, ask once as a §3.6 batch (commit, stash, or abort; default abort); if HEAD moved cleanly, return to bounded drift reconciliation/review rather than folding unrelated commits into the build range.
 - Record `base_sha` at approval. Builder changes are small new commits. Pin HEAD before each inspection. Fixes are new commits and cause a new pin; never amend reviewed commits.
@@ -257,4 +283,4 @@ At recon, compare the brief's `verified-against` SHA with HEAD. Map `git diff --
 - Use Windows-safe absolute paths. PowerShell 5.1 is canonical; Git Bash calls scripts with `powershell -NoProfile -ExecutionPolicy Bypass -File`. Do not use `/tmp`, `mktemp`, heredocs, `</dev/null`, or `gtimeout`.
 - When a resolved wiki root is outside the project, pass that exact root to `loop-claude.ps1 -AddDir`; restricted Claude calls must not receive broader filesystem scope.
 - Codex write invocations use the locked `codex_write_flag: --dangerously-bypass-approvals-and-sandbox` value from this protocol. Do not probe for or substitute a different flag at run time.
-- Wrapper exit codes: `0` valid output; `2` malformed output; `3` killed timeout; `1` tool failure. Never silently self-review when the adversary is unavailable.
+- Wrapper exit codes: `0` valid output; `2` malformed output; `3` killed timeout (soft or hard cap); `1` tool failure, including `provider-unreachable`. Never silently self-review when the adversary is unavailable.

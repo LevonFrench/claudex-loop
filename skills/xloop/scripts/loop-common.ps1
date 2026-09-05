@@ -280,6 +280,300 @@ function Get-TerminatorValidation {
     return [pscustomobject]@{ Valid = $true; Terminator = $terminator; Reason = '' }
 }
 
+function Get-ContractProofDeclaration {
+    <#
+    build/CONTRACT.md declares the evidence rungs a builder report must answer
+    (protocol §3.7):
+      PROOF-STATIC: <proof_cmd>
+      PROOF-REAL: <one command that exercises the user-visible path> | none - <reason>
+    A missing contract, or one without these lines, declares nothing. The dash after
+    `none` may be an em dash, `--`, `-`, or `:`.
+    #>
+    param([string]$Path)
+
+    $declaration = [pscustomobject]@{ Exists = $false; Static = ''; Real = ''; RealNone = $false; RealReason = '' }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.File]::Exists($Path)) { return $declaration }
+    $declaration.Exists = $true
+    $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+    $static = [regex]::Match($text, '(?m)^PROOF-STATIC:[ \t]*(?<value>\S.*?)[ \t]*$')
+    if ($static.Success) { $declaration.Static = $static.Groups['value'].Value }
+    $real = [regex]::Match($text, '(?m)^PROOF-REAL:[ \t]*(?<value>\S.*?)[ \t]*$')
+    if ($real.Success) {
+        $value = $real.Groups['value'].Value
+        $none = [regex]::Match($value, '(?i)^none(?:\s*(?:\u2014|--|-|:)\s*(?<reason>.*))?$')
+        if ($none.Success) {
+            $declaration.RealNone = $true
+            $declaration.RealReason = $none.Groups['reason'].Value.Trim()
+        } else {
+            $declaration.Real = $value
+        }
+    }
+    return $declaration
+}
+
+function Get-ReportProofLines {
+    <#
+    A builder report answers each declared proof on its own line:
+      PROOF-STATIC: pass | fail | not-verified - <reason>
+      PROOF-REAL: pass | fail | not-verified - <reason>
+    The first line per proof wins; the bounded output tail follows it in the report.
+    #>
+    param([AllowEmptyString()][string]$Text)
+
+    $lines = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $lines }
+    foreach ($match in [regex]::Matches($Text, '(?m)^PROOF-(?<name>STATIC|REAL):[ \t]*(?<status>pass|fail|not-verified)\b[ \t]*(?:(?:\u2014|--|-|:)[ \t]*(?<reason>.*?))?[ \t]*$')) {
+        $name = $match.Groups['name'].Value
+        if ($lines.Contains($name)) { continue }
+        $lines[$name] = [pscustomobject]@{ Status = $match.Groups['status'].Value; Reason = $match.Groups['reason'].Value.Trim() }
+    }
+    return $lines
+}
+
+function Get-ReportProofValidation {
+    <#
+    Protocol §3.7: a report whose contract declares a proof command must carry that
+    proof's status line; a missing line is a format defect, exactly like a missing
+    terminator. A contract that declared `none` for the real proof asks nothing of
+    the report there. Only b<N>-report.md outputs are checked. RealOpen is true when
+    a declared real proof command is still `not-verified` (or unanswered): the driver
+    records it as `open: PROOF-REAL`, which blocks build completion until a later
+    report clears it. A failed real proof is an ordinary RESULT: FAIL, not an open
+    verification.
+    #>
+    param([string]$OutputPath, [string]$LoopRoot)
+
+    $result = [pscustomobject]@{
+        Applicable = $false
+        Valid = $true
+        Reason = ''
+        RealOpen = $false
+        Proofs = [ordered]@{ static = ''; real = ''; real_declared = '' }
+    }
+    if ((Split-Path -Leaf $OutputPath) -notmatch '^b\d+-report\.md$') { return $result }
+    $declaration = Get-ContractProofDeclaration -Path (Join-Path $LoopRoot 'build\CONTRACT.md')
+    if ($declaration.RealNone) { $result.Proofs['real_declared'] = 'none' } elseif ($declaration.Real) { $result.Proofs['real_declared'] = 'command' }
+    if (-not $declaration.Static -and -not $declaration.Real -and -not $declaration.RealNone) { return $result }
+    $result.Applicable = $true
+
+    $text = if ([System.IO.File]::Exists($OutputPath)) { [System.IO.File]::ReadAllText($OutputPath).TrimStart([char]0xFEFF) } else { '' }
+    $lines = Get-ReportProofLines -Text $text
+    if ($lines.Contains('STATIC')) { $result.Proofs['static'] = $lines['STATIC'].Status }
+    if ($lines.Contains('REAL')) { $result.Proofs['real'] = $lines['REAL'].Status }
+
+    $required = @()
+    if ($declaration.Static) { $required += 'STATIC' }
+    if ($declaration.Real) { $required += 'REAL' }
+    foreach ($name in $required) {
+        if (-not $lines.Contains($name)) {
+            $result.Valid = $false
+            $result.Reason = "Report is missing the PROOF-$name line its contract declares (PROOF-${name}: pass | fail | not-verified - <reason>)."
+            break
+        }
+        if ($lines[$name].Status -eq 'not-verified' -and [string]::IsNullOrWhiteSpace($lines[$name].Reason)) {
+            $result.Valid = $false
+            $result.Reason = "PROOF-${name}: not-verified must carry a reason after the dash."
+            break
+        }
+    }
+    if ($declaration.Real) {
+        $result.RealOpen = ((-not $lines.Contains('REAL')) -or ($lines['REAL'].Status -eq 'not-verified'))
+    }
+    return $result
+}
+
+function Invoke-LoopGitText {
+    <#
+    Bounded clerical Git call for the bookkeeping scripts: returns the exit code and
+    trimmed text, never throws on a non-zero exit, and surfaces dubious ownership as
+    the exact command the user must run themselves.
+    #>
+    param([string]$Root, [string[]]$Arguments)
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& git -C $Root @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        return [pscustomobject]@{ ExitCode = 127; Text = $_.Exception.Message }
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    $text = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+    if ($exitCode -ne 0 -and $text -match 'detected dubious ownership') {
+        throw "Git rejected repository ownership. Run this yourself, then retry:`ngit config --global --add safe.directory `"$($Root -replace '\\', '/')`""
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Text = $text }
+}
+
+function Get-FixCoverage {
+    <#
+    Protocol §3.7 (S5): each fix commit subject begins with the finding ID it closes,
+    so coverage is clerical. The subject prefix before the first colon is split into
+    tokens and matched exactly against the open IDs; `PROOF-REAL` is a verification
+    marker, not a finding, and is never counted. Order follows the open list.
+    #>
+    param([string[]]$OpenId, [string[]]$Subject)
+
+    $covered = New-Object System.Collections.ArrayList
+    $uncovered = New-Object System.Collections.ArrayList
+    $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::Ordinal)
+    foreach ($line in @($Subject)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $colon = $line.IndexOf(':')
+        $prefix = if ($colon -ge 0) { $line.Substring(0, $colon) } else { $line }
+        foreach ($token in @($prefix -split '[\s,;/&+]+')) {
+            $trimmed = $token.Trim('[', ']', '(', ')')
+            if ($trimmed) { [void]$seen.Add($trimmed) }
+        }
+    }
+    foreach ($id in @($OpenId)) {
+        $value = [string]$id
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -eq 'PROOF-REAL') { continue }
+        if ($seen.Contains($value)) { [void]$covered.Add($value) } else { [void]$uncovered.Add($value) }
+    }
+    return [pscustomobject]@{ Covered = @($covered); Uncovered = @($uncovered) }
+}
+
+function Get-ProviderProbeEndpoint {
+    param([ValidateSet('claude', 'codex')][string]$Provider)
+
+    $override = [Environment]::GetEnvironmentVariable('XLOOP_PROBE_ENDPOINT_' + $Provider.ToUpperInvariant())
+    if (-not [string]::IsNullOrWhiteSpace($override)) { return $override.Trim() }
+    if ($Provider -eq 'claude') { return 'api.anthropic.com:443' }
+    return 'api.openai.com:443'
+}
+
+function Get-LoopProcessContext {
+    # Names the process context a probe or summon runs in, for remediation hints.
+    # Redirected streams mean a driver, sandbox, or CI owns this process.
+    if (Test-LoopInteractiveConsole) { return 'visible-console' }
+    return 'captured-child'
+}
+
+function Test-ProviderConnectionRefusal {
+    param([AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return ($Text -match '(?i)(ConnectionRefused|ECONNREFUSED|connection (?:was )?(?:actively )?refused|actively refused|ENETUNREACH|EHOSTUNREACH|network is unreachable|no route to host)')
+}
+
+function Test-ProviderReachability {
+    <#
+    Bounded, token-free pre-flight (S11). It runs inside the wrapper's own process,
+    which is the context the summon inherits, so a sandbox that blocks the child's
+    network is caught before a packet or a nudge is spent. Two probes:
+      - socket: one TCP connect to the provider endpoint. XLOOP_PROBE_ENDPOINT_<PROVIDER>
+        overrides host:port; `none` skips it.
+      - cli: optional. XLOOP_PROBE_ARGS_<PROVIDER> names token-free arguments for the
+        resolved executable; refusal text in its output counts as refused.
+    Only an actual refusal is conclusive. DNS failures, timeouts, and other errors are
+    inconclusive and the summon proceeds, so an offline machine is never misreported
+    as a sandbox and a hanging probe cannot outlive its bound.
+    #>
+    param(
+        [ValidateSet('claude', 'codex')][string]$Provider,
+        [string]$Executable = '',
+        [string]$WorkingDirectory = '',
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 5
+    )
+
+    $envTimeout = [Environment]::GetEnvironmentVariable('XLOOP_PROBE_TIMEOUT_SEC')
+    if ($envTimeout -match '^\d+$' -and [int]$envTimeout -ge 1 -and [int]$envTimeout -le 120) { $TimeoutSeconds = [int]$envTimeout }
+    $result = [ordered]@{ provider = $Provider; result = 'skipped'; method = ''; endpoint = ''; detail = ''; context = (Get-LoopProcessContext) }
+
+    $endpoint = Get-ProviderProbeEndpoint -Provider $Provider
+    if ($endpoint -and $endpoint -notin @('none', 'skip', 'off')) {
+        $result['endpoint'] = $endpoint
+        $result['method'] = 'socket'
+        $split = $endpoint.LastIndexOf(':')
+        $hostName = if ($split -gt 0) { $endpoint.Substring(0, $split) } else { $endpoint }
+        $port = 443
+        if ($split -gt 0 -and $endpoint.Substring($split + 1) -match '^\d+$') { $port = [int]$endpoint.Substring($split + 1) }
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $pending = $client.BeginConnect($hostName, $port, $null, $null)
+            if (-not $pending.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+                $result['result'] = 'inconclusive'
+                $result['detail'] = "connect to $endpoint did not answer within $TimeoutSeconds s"
+            } else {
+                $client.EndConnect($pending)
+                $result['result'] = 'reachable'
+            }
+        } catch {
+            $inner = $_.Exception
+            while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+            $code = ''
+            if ($inner -is [System.Net.Sockets.SocketException]) { $code = [string]$inner.SocketErrorCode }
+            $result['detail'] = ($code + ' ' + $inner.Message).Trim()
+            if ($code -in @('ConnectionRefused', 'NetworkUnreachable', 'HostUnreachable', 'AccessDenied') -or (Test-ProviderConnectionRefusal -Text $inner.Message)) {
+                $result['result'] = 'refused'
+            } else {
+                $result['result'] = 'inconclusive'
+            }
+        } finally {
+            try { $client.Close() } catch { }
+        }
+        if ($result['result'] -eq 'refused') { return $result }
+    }
+
+    $probeArguments = [Environment]::GetEnvironmentVariable('XLOOP_PROBE_ARGS_' + $Provider.ToUpperInvariant())
+    if ($Executable -and [System.IO.File]::Exists($Executable) -and -not [string]::IsNullOrWhiteSpace($probeArguments)) {
+        $result['method'] = if ($result['method']) { 'socket+cli' } else { 'cli' }
+        $info = New-Object System.Diagnostics.ProcessStartInfo
+        $info.FileName = $Executable
+        $info.Arguments = $probeArguments.Trim()
+        $info.WorkingDirectory = if ($WorkingDirectory) { $WorkingDirectory } else { (Split-Path -Parent $Executable) }
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardInput = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $process = $null
+        try {
+            $process = [System.Diagnostics.Process]::Start($info)
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            $process.StandardInput.Close()
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                Stop-ProcessTree -ProcessId $process.Id
+                if ($result['result'] -ne 'reachable') { $result['result'] = 'inconclusive' }
+                $result['detail'] = "cli probe did not finish within $TimeoutSeconds s"
+            } else {
+                $process.WaitForExit()
+                $text = ($stdoutTask.GetAwaiter().GetResult() + "`n" + $stderrTask.GetAwaiter().GetResult()).Trim()
+                if ($text.Length -gt 300) { $text = $text.Substring(0, 300) }
+                if (Test-ProviderConnectionRefusal -Text $text) {
+                    $result['result'] = 'refused'
+                    $result['detail'] = $text
+                } elseif ($process.ExitCode -eq 0) {
+                    if ($result['result'] -ne 'reachable') { $result['result'] = 'reachable' }
+                } else {
+                    if ($result['result'] -ne 'reachable') { $result['result'] = 'inconclusive' }
+                    $result['detail'] = "cli probe exited $($process.ExitCode): $text"
+                }
+            }
+        } catch {
+            if ($result['result'] -ne 'reachable') { $result['result'] = 'inconclusive' }
+            $result['detail'] = $_.Exception.Message
+        } finally {
+            if ($process) { $process.Dispose() }
+        }
+    }
+    return $result
+}
+
+function Get-ProviderUnreachableHint {
+    param([string]$Provider, $Probe)
+
+    $context = if ($Probe['context'] -eq 'visible-console') { 'a visible console' } else { 'a captured child process (its streams are redirected: a driver, a sandbox, or CI is running this wrapper)' }
+    $upper = $Provider.ToUpperInvariant()
+    return ("Provider $Provider refused a connection during pre-flight from $context via $($Probe['method']) $($Probe['endpoint']): $($Probe['detail']). " +
+        'No packet was sent and no nudge was spent. If the driver is sandboxed (for example Codex on Windows), re-run this exact wrapper command outside the sandbox: request escalation once for it, or start it from a visible console (-Visible or XLOOP_VISIBLE=1). ' +
+        "Set XLOOP_PROBE_ENDPOINT_$upper=none to skip the socket probe when the endpoint is intentionally unreachable.")
+}
+
 function Test-AgentExecutable {
     <#
     Candidates are validated only as canonical absolute paths, because a relative
@@ -817,14 +1111,16 @@ function Invoke-NativeProcess {
         [int]$TimeoutSeconds,
         [switch]$Visible,
         [string]$HandoffRoot = '',
-        $Guard = $null
+        $Guard = $null,
+        [int]$SoftTimeoutSeconds = 0,
+        [string]$LivenessRepository = ''
     )
 
     $wantVisible = [bool]$Visible
     if ($env:XLOOP_HEADLESS -eq '1') { $wantVisible = $false }
     if ($wantVisible -and -not (Test-LoopWindows)) { $wantVisible = $false }
     if ($wantVisible) {
-        return Invoke-VisibleProcess -Executable $Executable -Arguments $Arguments -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds -HandoffRoot $HandoffRoot -Guard $Guard
+        return Invoke-VisibleProcess -Executable $Executable -Arguments $Arguments -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds -HandoffRoot $HandoffRoot -Guard $Guard -SoftTimeoutSeconds $SoftTimeoutSeconds -LivenessRepository $LivenessRepository
     }
 
     $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -843,6 +1139,10 @@ function Invoke-NativeProcess {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
     if (-not $process.Start()) { throw "Failed to start $Executable" }
+    if ($SoftTimeoutSeconds -gt 0 -and $SoftTimeoutSeconds -lt $TimeoutSeconds) {
+        $process.StandardInput.Close()
+        return Watch-ProcessLiveness -Process $process -TimeoutSeconds $TimeoutSeconds -SoftTimeoutSeconds $SoftTimeoutSeconds -LivenessRepository $LivenessRepository
+    }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $process.StandardInput.Close()
@@ -852,15 +1152,136 @@ function Invoke-NativeProcess {
         $timedOutPid = $process.Id
         Stop-ProcessTree -ProcessId $timedOutPid
         try { $process.WaitForExit(5000) | Out-Null } catch { }
-        return [pscustomobject]@{ ExitCode = 3; TimedOut = $true; StdOut = ''; StdErr = "Timed out after $TimeoutSeconds seconds (pid $timedOutPid)."; Visible = $false }
+        return [pscustomobject]@{ ExitCode = 3; TimedOut = $true; TimeoutKind = 'hard'; StdOut = ''; StdErr = "Timed out after $TimeoutSeconds seconds (pid $timedOutPid)."; Visible = $false }
     }
 
     $process.WaitForExit()
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
         TimedOut = $false
+        TimeoutKind = ''
         StdOut   = $stdoutTask.GetAwaiter().GetResult()
         StdErr   = $stderrTask.GetAwaiter().GetResult()
+        Visible  = $false
+    }
+}
+
+function Get-LivenessRepositorySignal {
+    <#
+    Cheap, lock-free view of builder progress: HEAD plus the porcelain status.
+    --no-optional-locks keeps the wrapper from taking index.lock under a builder
+    that is committing at that moment. Any error reads as an empty signal.
+    #>
+    param([string]$Repository)
+
+    if ([string]::IsNullOrWhiteSpace($Repository)) { return '' }
+    try {
+        $head = Invoke-LoopGitText -Root $Repository -Arguments @('rev-parse', '--verify', '-q', 'HEAD')
+        $status = Invoke-LoopGitText -Root $Repository -Arguments @('--no-optional-locks', 'status', '--porcelain')
+    } catch {
+        return ''
+    }
+    if ($head.ExitCode -ne 0) { return '' }
+    return ($head.Text + '|' + $status.Text)
+}
+
+function Watch-ProcessLiveness {
+    <#
+    Liveness-based write-mode timeout (S12, D6). The hard cap is absolute. The soft
+    cap counts only since the last sign of life: bytes on stdout or stderr, a new
+    commit, or a change in the worktree status. A builder that is slow but working
+    is therefore not killed for being slow, and one that has gone quiet is stopped
+    long before the hard cap. Streams are read incrementally so output counts as it
+    arrives; the repository is polled at most every quarter of the soft cap.
+    #>
+    param($Process, [int]$TimeoutSeconds, [int]$SoftTimeoutSeconds, [string]$LivenessRepository = '')
+
+    $stdoutBuffer = New-Object System.IO.MemoryStream
+    $stderrBuffer = New-Object System.IO.MemoryStream
+    $stdoutStream = $Process.StandardOutput.BaseStream
+    $stderrStream = $Process.StandardError.BaseStream
+    $stdoutChunk = New-Object byte[] 8192
+    $stderrChunk = New-Object byte[] 8192
+    $stdoutTask = $stdoutStream.ReadAsync($stdoutChunk, 0, $stdoutChunk.Length)
+    $stderrTask = $stderrStream.ReadAsync($stderrChunk, 0, $stderrChunk.Length)
+    $stdoutDone = $false
+    $stderrDone = $false
+
+    $started = [datetime]::UtcNow
+    $lastActivity = $started
+    $lastRepositoryPoll = $started
+    $repositoryPollSeconds = [Math]::Max(1, [int][Math]::Floor($SoftTimeoutSeconds / 4))
+    $repositorySignal = Get-LivenessRepositorySignal -Repository $LivenessRepository
+    $pollMilliseconds = [Math]::Max(200, [Math]::Min(1000, $SoftTimeoutSeconds * 250))
+    $timedOut = $false
+    $timeoutKind = ''
+    $exitedAt = $null
+
+    while ($true) {
+        $activity = $false
+        if (-not $stdoutDone -and $stdoutTask.IsCompleted) {
+            $count = 0
+            try { $count = $stdoutTask.Result } catch { $count = 0 }
+            if ($count -le 0) { $stdoutDone = $true } else {
+                $stdoutBuffer.Write($stdoutChunk, 0, $count)
+                $activity = $true
+                $stdoutTask = $stdoutStream.ReadAsync($stdoutChunk, 0, $stdoutChunk.Length)
+            }
+        }
+        if (-not $stderrDone -and $stderrTask.IsCompleted) {
+            $count = 0
+            try { $count = $stderrTask.Result } catch { $count = 0 }
+            if ($count -le 0) { $stderrDone = $true } else {
+                $stderrBuffer.Write($stderrChunk, 0, $count)
+                $activity = $true
+                $stderrTask = $stderrStream.ReadAsync($stderrChunk, 0, $stderrChunk.Length)
+            }
+        }
+        $now = [datetime]::UtcNow
+        if ($activity) { $lastActivity = $now }
+        if ($stdoutDone -and $stderrDone -and $Process.HasExited) { break }
+        if ($Process.HasExited) {
+            # The pipes outlive the process only while a grandchild holds them; a
+            # bounded drain keeps that from becoming a silent hang.
+            if ($null -eq $exitedAt) { $exitedAt = $now }
+            if (($now - $exitedAt).TotalSeconds -ge 5) { break }
+        } else {
+            if (-not $activity -and $LivenessRepository -and ($now - $lastRepositoryPoll).TotalSeconds -ge $repositoryPollSeconds) {
+                $lastRepositoryPoll = $now
+                $signal = Get-LivenessRepositorySignal -Repository $LivenessRepository
+                if ($signal -cne $repositorySignal) {
+                    $repositorySignal = $signal
+                    $lastActivity = $now
+                }
+            }
+            if (($now - $started).TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; $timeoutKind = 'hard'; break }
+            if (($now - $lastActivity).TotalSeconds -ge $SoftTimeoutSeconds) { $timedOut = $true; $timeoutKind = 'soft'; break }
+        }
+        [System.Threading.Thread]::Sleep($pollMilliseconds)
+    }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    if ($timedOut) {
+        $timedOutPid = $Process.Id
+        Stop-ProcessTree -ProcessId $timedOutPid
+        try { $Process.WaitForExit(5000) | Out-Null } catch { }
+        $elapsed = [int]([datetime]::UtcNow - $started).TotalSeconds
+        $quiet = [int]([datetime]::UtcNow - $lastActivity).TotalSeconds
+        $message = if ($timeoutKind -eq 'soft') {
+            "Timed out after $elapsed seconds: no output, commit, or worktree change for $quiet seconds (soft cap $SoftTimeoutSeconds s, hard cap $TimeoutSeconds s, pid $timedOutPid)."
+        } else {
+            "Timed out after $TimeoutSeconds seconds (hard cap; the builder was still active $quiet seconds ago; pid $timedOutPid)."
+        }
+        return [pscustomobject]@{ ExitCode = 3; TimedOut = $true; TimeoutKind = $timeoutKind; StdOut = ''; StdErr = $message; Visible = $false }
+    }
+
+    try { $Process.WaitForExit() } catch { }
+    return [pscustomobject]@{
+        ExitCode = $Process.ExitCode
+        TimedOut = $false
+        TimeoutKind = ''
+        StdOut   = $utf8.GetString($stdoutBuffer.ToArray())
+        StdErr   = $utf8.GetString($stderrBuffer.ToArray())
         Visible  = $false
     }
 }
@@ -878,7 +1299,7 @@ function Invoke-VisibleProcess {
     declared internal to the packet guard and deleted once they have been read. No
     prompt or transcript material is left behind under .loop.
     #>
-    param([string]$Executable, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutSeconds, [string]$HandoffRoot, $Guard = $null)
+    param([string]$Executable, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutSeconds, [string]$HandoffRoot, $Guard = $null, [int]$SoftTimeoutSeconds = 0, [string]$LivenessRepository = '')
 
     if (-not $HandoffRoot) { $HandoffRoot = Join-Path $WorkingDirectory '.loop\tmp' }
     [System.IO.Directory]::CreateDirectory($HandoffRoot) | Out-Null
@@ -914,12 +1335,40 @@ function Invoke-VisibleProcess {
         $process.StartInfo = $info
         if (-not $process.Start()) { throw "Failed to start visible runner for $Executable" }
 
-        $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+        $completed = $false
+        $timeoutKind = 'hard'
+        if ($SoftTimeoutSeconds -gt 0 -and $SoftTimeoutSeconds -lt $TimeoutSeconds) {
+            # The runner streams to the handoff files, so their growth is the
+            # wrapper-visible output signal; commits and worktree changes are the rest.
+            $started = [datetime]::UtcNow
+            $lastActivity = $started
+            $lastSize = -1
+            $repositorySignal = Get-LivenessRepositorySignal -Repository $LivenessRepository
+            $pollMilliseconds = [Math]::Max(200, [Math]::Min(1000, $SoftTimeoutSeconds * 250))
+            while ($true) {
+                if ($process.WaitForExit($pollMilliseconds)) { $completed = $true; break }
+                $now = [datetime]::UtcNow
+                $size = 0
+                foreach ($streamPath in @($stdoutPath, $stderrPath)) {
+                    if ([System.IO.File]::Exists($streamPath)) { $size += (Get-Item -LiteralPath $streamPath -Force).Length }
+                }
+                if ($size -ne $lastSize) { $lastSize = $size; $lastActivity = $now }
+                elseif ($LivenessRepository) {
+                    $signal = Get-LivenessRepositorySignal -Repository $LivenessRepository
+                    if ($signal -cne $repositorySignal) { $repositorySignal = $signal; $lastActivity = $now }
+                }
+                if (($now - $started).TotalSeconds -ge $TimeoutSeconds) { $timeoutKind = 'hard'; break }
+                if (($now - $lastActivity).TotalSeconds -ge $SoftTimeoutSeconds) { $timeoutKind = 'soft'; break }
+            }
+        } else {
+            $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+        }
         if (-not $completed) {
             $timedOutPid = $process.Id
             Stop-ProcessTree -ProcessId $timedOutPid
             try { $process.WaitForExit(5000) | Out-Null } catch { }
-            return [pscustomobject]@{ ExitCode = 3; TimedOut = $true; StdOut = ''; StdErr = "Timed out after $TimeoutSeconds seconds (visible pid $timedOutPid)."; Visible = $true }
+            $message = if ($timeoutKind -eq 'soft') { "Timed out: no output, commit, or worktree change for $SoftTimeoutSeconds seconds (soft cap; hard cap $TimeoutSeconds s; visible pid $timedOutPid)." } else { "Timed out after $TimeoutSeconds seconds (visible pid $timedOutPid)." }
+            return [pscustomobject]@{ ExitCode = 3; TimedOut = $true; TimeoutKind = $timeoutKind; StdOut = ''; StdErr = $message; Visible = $true }
         }
 
         $stdout = if ([System.IO.File]::Exists($stdoutPath)) { [System.IO.File]::ReadAllText($stdoutPath) } else { '' }
@@ -931,7 +1380,7 @@ function Invoke-VisibleProcess {
         } else {
             $stderr += "`nVisible runner did not write a durable exit code."
         }
-        return [pscustomobject]@{ ExitCode = $exitCode; TimedOut = $false; StdOut = $stdout; StdErr = $stderr; Visible = $true }
+        return [pscustomobject]@{ ExitCode = $exitCode; TimedOut = $false; TimeoutKind = ''; StdOut = $stdout; StdErr = $stderr; Visible = $true }
     } finally {
         foreach ($path in @($requestPath, $stdoutPath, $stderrPath, $exitPath)) {
             try { if ([System.IO.File]::Exists($path)) { [System.IO.File]::Delete($path) } } catch { }

@@ -20,7 +20,7 @@ End with one compact cosmetic mini-batch and `Pre-settled from wiki (say so to r
 
 Never include an authorization question. Sending packets to the other agent, letting it read cited project context, and letting the builder write and commit inside the project are already authorized by invoking the loop; a question such as "may XLoop send this plan to Claude" is not load-bearing and must not appear.
 
-If `proof_cmd` is unknown, ask for or recommend it here. If recon hit its file cap or identified a research gap, include that decision here rather than interrupting recon.
+If `proof_cmd` is unknown, ask for or recommend it here. Always ask for `PROOF-REAL` alongside it, in the same five-line form: one command that exercises the user-visible path (the CLI a person runs, the page they load, the endpoint they call), or `none — <reason>` when the change has no user path, such as a pure library change. Recommend a concrete command when recon found one and `none — <reason>` otherwise; `Default-if-silent` is the recommendation. Never invent a fake real proof to satisfy the line: an honest `none` beats a mock that claims the user's rung. If recon hit its file cap or identified a research gap, include that decision here rather than interrupting recon.
 
 ## Apply answers
 
@@ -31,7 +31,7 @@ Draft the plan using the exact anchored schema in `.loop/PROTOCOL.md` §3.2:
 - Goal at most 80 words.
 - Numbered approach steps at most three lines each.
 - Stable decision IDs with choice, rejected alternative, and one-sentence reason.
-- Proof command under Toolchain and in state.
+- Proof command under Toolchain and in state, as `Proof:`; the real-path proof beside it as `Proof-real: <command>` or `Proof-real: none — <reason>`, and in state as `proof_real`.
 - Risks and non-goals explicit.
 - Evidence by wiki path or `file:line`, never copied prose.
 - Maximum 2,000 words.
@@ -40,7 +40,7 @@ Create `.loop/REVIEW-LOG.md` with the run title, empty `Settled`, and empty `Rou
 
 ## Review gate
 
-Before transition, require a resolved proof command and no open load-bearing question. Record current HEAD as `base_sha`. Atomically set:
+Before transition, require a resolved proof command, a resolved real proof (a command or `none — <reason>`), and no open load-bearing question. Record current HEAD as `base_sha`. Record both proofs with the transition that advances the phase, `scripts/loop-step.ps1 -Transition interrogate-to-review -ProofCmd <command> -ProofReal <command | "none — <reason>"> -BaseSha <head>`; `review-approve` later refuses to enter build while either is blank. Atomically set:
 
 ```text
 phase: review
