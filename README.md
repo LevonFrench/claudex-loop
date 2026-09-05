@@ -111,7 +111,7 @@ No verbal recap is required. To inspect the checkpoint mechanically:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <xloop-skill>\scripts\loop-status.ps1 -Project X:\work\project
 ```
 
-To see which xloop mechanisms have ever run on this machine (wrappers, transitions, nudges, restores, failover, summon modes), run `loop-status.ps1 -Fired`; `scripts\doctor.ps1` prints the same table. The record lives in `~\.xloop\fired.json` and holds names and timestamps only.
+To see which xloop mechanisms have ever run on this machine (wrappers, transitions, nudges, restores, failover, summon modes), run `loop-status.ps1 -Fired`; `scripts\doctor.ps1` prints the same table. The record lives in `~\.xloop\fired.json` and holds names and timestamps only. `loop-status.ps1 -Project <p> -Corrections` lists the user rulings and closing rating closeout promotes as lessons, and `-Lessons` performs recon's bounded lessons grep with superseded notes excluded.
 
 The locked v1 choices are:
 

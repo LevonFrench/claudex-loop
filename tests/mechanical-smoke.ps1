@@ -1020,6 +1020,44 @@ try {
     $closeoutRender = Invoke-ChildPowerShell -Script $renderScript -Arguments @('-Project', $s6Project, '-Template', 'closeout.txt', '-OutFile', '.loop\tmp\closeout-packet.txt', '-ValuesFile', '.loop\tmp\closeout-values.txt')
     Assert-True -Condition ($closeoutRender.ExitCode -eq 0) -Message "closeout.txt did not render with the question batch token: $($closeoutRender.Output)"
     Assert-True -Condition ([IO.File]::ReadAllText((Join-Path $s6Project '.loop\tmp\closeout-packet.txt')) -match '(?m)^Questions: \.loop/QUESTIONS\.md\s*$') -Message 'The rendered closeout packet does not name the question batch.'
+
+    # S8: two contradicting lessons where the newer supersedes the older. Recon's
+    # bounded grep cites only the newer; a superseded note is never served.
+    $fixtureWiki = Join-Path $loopCRoot 'fixture wiki'
+    $fixtureNotes = Join-Path $fixtureWiki 'raw\notes'
+    [IO.Directory]::CreateDirectory($fixtureNotes) | Out-Null
+    $olderStem = '2026-08-01-ll-retry-policy'
+    $newerStem = '2026-09-01-ll-retry-policy-reversed'
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($olderStem + '.md')), "---`ntitle: Retry policy lesson`nlesson_kind: lessons-learned`nloop: 2026-08-01-retry`nsupersedes:`nsuperseded-by: $newerStem`n---`nExponential backoff caused duplicate POSTs; use fixed retries.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($newerStem + '.md')), "---`ntitle: Retry policy lesson (reversed)`nlesson_kind: lessons-learned`nloop: 2026-09-01-retry-fix`nsupersedes: $olderStem`nsuperseded-by:`n---`nThe duplicates came from a missing idempotency key; exponential backoff is correct.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes '2026-07-15-ll-unrelated.md'), "---`ntitle: Unrelated lesson`nlesson_kind: lessons-learned`nsupersedes:`nsuperseded-by:`n---`nKeep the proof command in STATE.`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes '2026-09-02-not-a-lesson.md'), "---`ntitle: Meeting note`n---`nNot a lesson.`n", $utf8)
+    $lessonGrep = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-AsJson')
+    Assert-True -Condition ($lessonGrep.ExitCode -eq 0) -Message "loop-status.ps1 -Lessons failed: $($lessonGrep.Output)"
+    $lessonJson = $lessonGrep.Output | ConvertFrom-Json
+    $lessonNames = @($lessonJson.lessons | ForEach-Object { $_.name })
+    Assert-True -Condition ($lessonNames.Count -eq 2) -Message "Expected two live lesson notes, got: $($lessonNames -join ', ')"
+    Assert-True -Condition ($lessonNames[0] -eq ($newerStem + '.md') -and $lessonNames[1] -eq '2026-07-15-ll-unrelated.md') -Message "The lessons grep did not return the newest live notes in order: $($lessonNames -join ', ')"
+    Assert-True -Condition ($lessonNames -notcontains ($olderStem + '.md')) -Message 'The superseded lesson was still cited.'
+    Assert-True -Condition ($lessonJson.lessons[0].supersedes -eq $olderStem) -Message 'The newer note did not report what it supersedes.'
+    $lessonText = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-Max', '1')
+    Assert-True -Condition ($lessonText.Output -match [regex]::Escape($newerStem) -and $lessonText.Output -notmatch [regex]::Escape($olderStem + '.md') -and $lessonText.Output -match "\(supersedes $olderStem\)") -Message "The -Max 1 lessons listing is wrong: $($lessonText.Output)"
+    # Retiring only one side is still visible: a note that names supersedes: but
+    # whose target was never marked superseded-by: leaves both live, which is the
+    # dangling state the brief check reports.
+    [IO.File]::WriteAllText((Join-Path $fixtureNotes ($olderStem + '.md')), "---`ntitle: Retry policy lesson`nlesson_kind: lessons-learned`nsupersedes:`nsuperseded-by:`n---`nExponential backoff caused duplicate POSTs; use fixed retries.`n", $utf8)
+    $bothLive = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', $fixtureWiki, '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($bothLive.lessons).Count -eq 3) -Message 'A note without superseded-by: set was excluded.'
+    # The project route reads the wiki root from STATE and refuses no-wiki mode.
+    $noWikiLessons = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $loopCProject, '-Lessons')
+    Assert-True -Condition ($noWikiLessons.ExitCode -eq 1) -Message 'No-wiki mode produced a lessons list.'
+    $setWiki = Invoke-ChildPowerShell -Script $stepScript -Arguments @('-Project', $loopCProject, '-Transition', 'refresh-lock', '-Wiki', $fixtureWiki)
+    Assert-True -Condition ($setWiki.ExitCode -eq 0) -Message "Recording the wiki root failed: $($setWiki.Output)"
+    $projectLessons = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Project', $loopCProject, '-Lessons', '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($projectLessons.lessons).Count -eq 3 -and $projectLessons.wiki -eq $fixtureWiki) -Message "The project route did not read the wiki root from STATE: $($projectLessons | ConvertTo-Json -Compress)"
+    $missingNotes = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Lessons', '-Wiki', (Join-Path $loopCRoot 'no such wiki'), '-AsJson')).Output | ConvertFrom-Json
+    Assert-True -Condition (@($missingNotes.lessons).Count -eq 0) -Message 'A wiki without raw/notes did not read as zero lessons.'
 } finally {
     $env:PATH = $loopCSavedPath
     Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue

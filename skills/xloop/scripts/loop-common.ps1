@@ -1049,9 +1049,9 @@ function Get-LoopCorrectionPromotions {
 
     if ($RatingPath -and [System.IO.File]::Exists($RatingPath)) {
         $ratingText = [System.IO.File]::ReadAllText($RatingPath).TrimStart([char]0xFEFF)
-        $ratingMatch = [regex]::Match($ratingText, '(?m)^Rating:\s*([1-5])\s*$')
+        $ratingMatch = [regex]::Match($ratingText, '(?m)^Rating:[ \t]*([1-5])[ \t]*\r?$')
         if ($ratingMatch.Success) {
-            $feedbackMatch = [regex]::Match($ratingText, '(?m)^Feedback:\s*(\S.*)$')
+            $feedbackMatch = [regex]::Match($ratingText, '(?m)^Feedback:[ \t]*(\S[^\r\n]*)')
             $rating = [ordered]@{
                 tag = '[rating]'
                 kind = 'rating'
@@ -1062,6 +1062,39 @@ function Get-LoopCorrectionPromotions {
     }
 
     return [pscustomobject]@{ Lessons = @($lessons); Dropped = @($dropped); Rating = $rating }
+}
+
+function Get-LoopRecentLessons {
+    <#
+    Recon's bounded lessons grep (protocol §5, §3.8): the newest lesson notes under
+    <wiki>/raw/notes with `lesson_kind: lessons-learned`, excluding any note whose
+    `superseded-by:` field is set, so a retired lesson is never served beside the
+    one that replaced it. Newest is by the note's YYYY-MM-DD filename prefix, then
+    by name. Reads only; never opens anything outside raw/notes.
+    #>
+    param([Parameter(Mandatory = $true)][string]$WikiRoot, [ValidateRange(1, 50)][int]$Max = 5)
+
+    $notesRoot = Join-Path $WikiRoot 'raw\notes'
+    if (-not [System.IO.Directory]::Exists($notesRoot)) { return @() }
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($file in @(Get-ChildItem -LiteralPath $notesRoot -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+        $text = ''
+        try { $text = [System.IO.File]::ReadAllText($file.FullName).TrimStart([char]0xFEFF) } catch { continue }
+        if ($text -notmatch '(?m)^lesson_kind:[ \t]*lessons-learned[ \t]*\r?$') { continue }
+        # A blank field is a blank line: never let whitespace matching cross into
+        # the next frontmatter line.
+        $superseded = [regex]::Match($text, '(?m)^superseded-by:[ \t]*(\S[^\r\n]*)')
+        if ($superseded.Success) { continue }
+        $supersedes = [regex]::Match($text, '(?m)^supersedes:[ \t]*(\S[^\r\n]*)')
+        $stamp = [regex]::Match($file.Name, '^(\d{4}-\d{2}-\d{2})')
+        [void]$candidates.Add([pscustomobject]@{
+            Path = $file.FullName
+            Name = $file.Name
+            Date = if ($stamp.Success) { $stamp.Groups[1].Value } else { '0000-00-00' }
+            Supersedes = if ($supersedes.Success) { $supersedes.Groups[1].Value.Trim() } else { '' }
+        })
+    }
+    return @($candidates | Sort-Object -Property @{ Expression = 'Date'; Descending = $true }, @{ Expression = 'Name'; Descending = $true } | Select-Object -First $Max)
 }
 
 function Get-XloopHome {
