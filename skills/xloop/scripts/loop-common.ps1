@@ -106,7 +106,7 @@ function Test-ProviderQuotaFailure {
     $normalized = $Text.ToLowerInvariant()
     $patterns = @(
         '\b(insufficient[_ -]?quota|quota (?:has been )?(?:exceeded|exhausted)|exceeded (?:your |the )?quota)\b',
-        '\b(?:you(?:''ve| have)? |account |organization |workspace )?(?:hit|reached|exceeded|exhausted) (?:your |the )?(?:daily |weekly |monthly )?usage limit\b',
+        '\b(?:you(?:''ve| have)? |account |organization |workspace )?(?:hit|reached|exceeded|exhausted) (?:your |the )?(?:daily |weekly |monthly )?(?:usage|session) limit\b',
         '\b(?:usage|token) (?:allowance|quota) (?:is |has been )?(?:exhausted|exceeded|used up)\b',
         '\b(?:no|zero|0) (?:weighted )?tokens? (?:left|remaining)\b',
         '\b(?:credit balance|credits?) (?:is |are |has been )?(?:too low|depleted|exhausted|used up)\b',

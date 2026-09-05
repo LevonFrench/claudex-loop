@@ -183,6 +183,13 @@ try {
         $pathResolve = Invoke-ChildCommand -Command (". '$common'; (Resolve-AgentExecutable -Name 'codex' -Detailed).Source")
         Assert-True -Condition ($pathResolve.Output -eq 'path') -Message "Native PATH resolution failed: $($pathResolve.Output)"
 
+        # The quota classifier must recognize the Claude CLI's session-limit wording;
+        # the second live acceptance run filed it as a generic tool failure.
+        $sessionLimit = Invoke-ChildCommand -Command (". '$common'; Test-ProviderQuotaFailure -Provider 'claude' -Text 'You have hit your session limit - resets 2:40am (America/Chicago)'")
+        Assert-True -Condition ($sessionLimit.Output -eq 'True') -Message "A Claude session-limit refusal was not classified as quota: $($sessionLimit.Output)"
+        $notQuota = Invoke-ChildCommand -Command (". '$common'; Test-ProviderQuotaFailure -Provider 'claude' -Text 'Request timed out after 30 seconds'")
+        Assert-True -Condition ($notQuota.Output -eq 'False') -Message "A timeout was classified as quota: $($notQuota.Output)"
+
         $vendorRoot = Join-Path $tempRoot 'npm vendor\node_modules\@openai\codex\vendor\x86_64-pc-windows-msvc'
         [IO.Directory]::CreateDirectory($vendorRoot) | Out-Null
         Copy-Item -LiteralPath $codexMock -Destination (Join-Path $vendorRoot 'codex.exe')

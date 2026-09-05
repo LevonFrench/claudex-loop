@@ -23,6 +23,7 @@ All notable changes to this custom fork are documented here.
 
 ### Fixed
 
+- xloop: the quota classifier did not recognize the Claude CLI wording `You've hit your session limit`, so a Claude session-limit refusal was filed as a generic tool failure instead of `quota` (found by the second live acceptance run). Session limits now classify as quota and cross to the alternate provider where the role allows it.
 - xloop: the write-mode soft cap applied to every write summon, so a closeout, which writes to the wiki root and emits nothing until it finishes, was killed at 301 s in the first live acceptance run. The soft cap now applies only to builder reports (`b<N>-report.md`); closeout keeps the single hard cap.
 - xloop: the brief truth gate read a blank `supersedes:` field as a claim on the next line (`superseded-by:`), reporting false dangling targets for every lesson and decision with blank supersession fields. Whitespace after the colon no longer crosses the newline.
 - xloop: a declared append-only file that existed but was empty (the scaffolded `wiki-inbox.md` at every closeout whose agents wrote no inbox notes) crashed the packet guard with `The property 'Length' cannot be found`, failing the closeout summon with exit `1`. The guard now snapshots it as a zero-length baseline and accepts a valid append. Found by the dry-run live harness; covered by a smoke case.
