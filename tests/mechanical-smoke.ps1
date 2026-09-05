@@ -1079,7 +1079,8 @@ try {
             # doctor runs the same probe and only a refusal fails it.
             $env:XLOOP_PROBE_ENDPOINT_CLAUDE = '127.0.0.1:' + $closedPort
             $doctor = Invoke-ChildPowerShell -Script (Join-Path $repo 'scripts\doctor.ps1') -Arguments @('-CodexPath', $codexMock, '-ClaudePath', $claudeMock)
-            $doctorJson = ($doctor.Output -replace '(?s)^[^{]*', '') | ConvertFrom-Json
+            # doctor prints the fired table on stderr after the JSON; keep only the JSON object.
+            $doctorJson = ($doctor.Output -replace '(?s)^[^{]*', '' -replace '(?s)[^}]*$', '') | ConvertFrom-Json
             Assert-True -Condition ($doctorJson.checks.codex_reachability.result -eq 'skipped' -and $doctorJson.checks.codex_reachability.ok -eq $true) -Message "doctor did not skip a disabled probe: $($doctor.Output)"
             Assert-True -Condition ($doctorJson.checks.claude_reachability.result -eq 'refused' -and $doctorJson.checks.claude_reachability.ok -eq $false -and $doctorJson.checks.claude_reachability.remediation -match 'refused') -Message "doctor did not report a refused provider: $($doctor.Output)"
             $env:XLOOP_PROBE_ENDPOINT_CLAUDE = 'none'
@@ -1633,7 +1634,7 @@ try {
     # The closeout packet names the question batch so the promotion rule has its
     # input; rendering with the full token set succeeds.
     $renderScript = Join-Path $repo 'skills\xloop\scripts\loop-render.ps1'
-    $closeoutValues = "protocol_path=.loop/PROTOCOL.md`r`nstate_path=.loop/STATE.md`r`nplan_path=.loop/PLAN.md`r`nreview_log_path=.loop/REVIEW-LOG.md`r`nquestions_path=.loop/QUESTIONS.md`r`nwiki_inbox_path=.loop/wiki-inbox.md`r`ndiff_path=.loop/build/b1.diff`r`nreport_path=.loop/build/b1-report.md`r`nbrief_path=wiki/references/codebase-brief.md`r`nwiki_path=.wiki`r`noutput_path=.loop/CLOSEOUT-REPORT.md`r`n"
+    $closeoutValues = "protocol_path=.loop/PROTOCOL.md`r`nstate_path=.loop/STATE.md`r`nplan_path=.loop/PLAN.md`r`nreview_log_path=.loop/REVIEW-LOG.md`r`nquestions_path=.loop/QUESTIONS.md`r`nwiki_inbox_path=.loop/wiki-inbox.md`r`ndiff_path=.loop/build/b1.diff`r`nreport_path=.loop/build/b1-report.md`r`ncommits_path=.loop/tmp/commit-subjects.txt`r`nbrief_path=wiki/references/codebase-brief.md`r`nwiki_path=.wiki`r`noutput_path=.loop/CLOSEOUT-REPORT.md`r`n"
     [IO.File]::WriteAllText((Join-Path $s6Project '.loop\tmp\closeout-values.txt'), $closeoutValues, (New-Object Text.UTF8Encoding($false)))
     $closeoutRender = Invoke-ChildPowerShell -Script $renderScript -Arguments @('-Project', $s6Project, '-Template', 'closeout.txt', '-OutFile', '.loop\tmp\closeout-packet.txt', '-ValuesFile', '.loop\tmp\closeout-values.txt')
     Assert-True -Condition ($closeoutRender.ExitCode -eq 0) -Message "closeout.txt did not render with the question batch token: $($closeoutRender.Output)"
