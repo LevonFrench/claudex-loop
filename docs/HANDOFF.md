@@ -1,16 +1,16 @@
 # Release handoff
 
-Updated: 2026-09-01
+Updated: 2026-09-04
 
 ## Current state
 
 - Active branch: `release/xloop-windows-wiki`
-- Last code and workflow commit: `bd12951` (Peer Sessions 0.1.1; XLoop wrappers and workflow unchanged since `3aa3838bf8f074750f8ffd6e352c391bee583342`)
+- Last code and workflow commit: `94acf92` (XLoop quota failover across providers; 2026-09-04 design scope recorded)
 - Peer Sessions candidate source commit: `bd12951`
 - Peer Sessions version: `0.1.1`
 - MCPB SHA-256: `006464fe8c94effa761750620d9b67d60df8197c30ef110c8b86c2533f9e9724`
 - Public fork branch: `LevonFrench/claudex-loop:release/xloop-windows-wiki`
-- Windows workflow: see the run for the `bd12951` push and its successor before relying on local results.
+- Windows workflow: see the run for the `94acf92` push before relying on local results.
 - Worktree was clean when this handoff was written.
 
 The Peer Sessions 0.1.1 candidate is built, documented, pushed, and installed for Codex and Claude Code. The installed Claude cache was verified byte-identical to the candidate source. The Codex install resolves directly to the repository plugin. Both plugin managers report version `0.1.1` enabled. The running per-user broker is `0.1.1`; the previous `0.1.0` broker was replaced automatically by the new version-reconciliation path.
