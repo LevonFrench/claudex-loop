@@ -1873,7 +1873,13 @@ try {
         $liveOut = Join-Path $loopDRoot 'live out'
         foreach ($dryCase in @(@{ Author = 'claude'; Wiki = 'none' }, @{ Author = 'codex'; Wiki = 'empty' })) {
             $dry = Invoke-ChildPowerShell -Script $liveLoop -Arguments @('-DryRun', '-Author', $dryCase.Author, '-Wiki', $dryCase.Wiki, '-OutDir', $liveOut)
-            Assert-True -Condition ($dry.ExitCode -eq 0 -and $dry.Output -match 'live-loop: ALL SCENARIOS PASS') -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) failed: exit $($dry.ExitCode): $($dry.Output)"
+            if ($dry.ExitCode -ne 0) {
+                # The temp root is deleted on the way out, so the driver transcripts
+                # travel in the failure message.
+                $driverLogs = @(Get-ChildItem -LiteralPath (Join-Path $liveOut ('work\' + $dryCase.Author + '-' + $dryCase.Wiki)) -Filter 'driver-*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { '--- ' + $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName) })
+                Assert-True -Condition $false -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) failed: exit $($dry.ExitCode): $($dry.Output)`n$($driverLogs -join "`n")"
+            }
+            Assert-True -Condition ($dry.Output -match 'live-loop: ALL SCENARIOS PASS') -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) did not report ALL SCENARIOS PASS: $($dry.Output)"
             foreach ($stepNumber in 1..7) {
                 Assert-True -Condition ($dry.Output -match ('(?m)^PASS step ' + $stepNumber + ':')) -Message "The dry-run harness ($($dryCase.Author)/$($dryCase.Wiki)) did not print PASS for step ${stepNumber}: $($dry.Output)"
             }
