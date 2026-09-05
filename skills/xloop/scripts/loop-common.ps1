@@ -2174,7 +2174,7 @@ function Invoke-LoopBriefCheck {
         }
         foreach ($note in $notes) {
             $noteText = [System.IO.File]::ReadAllText($note.FullName)
-            foreach ($supersedes in [regex]::Matches($noteText, '(?m)^supersedes:[ \t]*(\S+)[ \t]*$')) {
+            foreach ($supersedes in [regex]::Matches($noteText, '(?m)^supersedes:[ \t]*(\S+)[ \t]*\r?$')) {
                 $target = $supersedes.Groups[1].Value.Trim('"', "'")
                 $ok = $ids.Contains($target)
                 & $addClaim 'supersedes' $target $ok $(if ($ok) { 'target note exists' } else { 'target note does not exist' }) ('raw/notes/' + $note.Name)

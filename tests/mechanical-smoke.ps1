@@ -1455,6 +1455,15 @@ try {
     Assert-True -Condition ($closeoutJson.ExitCode -eq 1 -and $closeoutParsed.ok -eq $false -and @($closeoutParsed.dangling).Count -eq 3) -Message "Closeout JSON did not list the dangling claims: $($closeoutJson.Output)"
     Assert-True -Condition ((@($closeoutParsed.dangling | ForEach-Object { $_.path }) -join ',') -ceq 'src/missing.txt,references/nope.md,2025-12-31-ll-older') -Message "Closeout JSON named the wrong claims: $($closeoutJson.Output)"
 
+    # Windows CRLF notes must retain the same claims as LF notes, including a
+    # missing supersedes target, while blank fields must remain unclaimed.
+    Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2026-01-01-ll-newer.md') -Content "---`r`nlesson_kind: lessons-learned`r`nsupersedes: 2025-12-31-ll-older`r`n---`r`nnewer`r`n"
+    Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2026-01-02-ll-blank.md') -Content "---`r`nlesson_kind: lessons-learned`r`nsupersedes:`r`nsuperseded-by:`r`n---`r`nblank fields`r`n"
+    $crlfCheck = Invoke-ChildPowerShell -Script $briefCheckScript -Arguments @('-Project', $briefProject, '-Mode', 'closeout', '-Json')
+    $crlfParsed = $crlfCheck.Output | ConvertFrom-Json
+    Assert-True -Condition ($crlfCheck.ExitCode -eq 1 -and @($crlfParsed.dangling).Count -eq 3) -Message "CRLF notes changed the dangling claims: $($crlfCheck.Output)"
+    Assert-True -Condition ((@($crlfParsed.dangling | ForEach-Object { $_.path }) -join ',') -ceq 'src/missing.txt,references/nope.md,2025-12-31-ll-older') -Message "CRLF notes lost the missing supersedes target or claimed a blank field: $($crlfCheck.Output)"
+
     # Repairing the wiki makes the same fixture pass in closeout mode.
     Write-FixtureFile -Path (Join-Path $briefWiki 'wiki\references\nope.md') -Content "# now exists`n"
     Write-FixtureFile -Path (Join-Path $briefWiki 'raw\notes\2025-12-31-ll-older.md') -Content "---`nlesson_kind: lessons-learned`n---`nolder`n"
