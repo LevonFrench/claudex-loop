@@ -9,6 +9,10 @@ case "$tmp_root" in
 esac
 trap 'rm -rf -- "$tmp_root"' EXIT
 
+# Every mechanism registration from the wrappers below lands in a throwaway xloop
+# home, never the real user profile (protocol 3.10).
+export XLOOP_HOME="$(cygpath -w "$tmp_root")\xloop home"
+
 mock_bin="$tmp_root/mock bin"
 mkdir -p -- "$mock_bin"
 cat >"$mock_bin/codex" <<'MOCK'
