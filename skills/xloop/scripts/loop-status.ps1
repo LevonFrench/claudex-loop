@@ -1,15 +1,37 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Project,
+    [string]$Project = '',
 
-    [switch]$AsJson
+    [switch]$AsJson,
+
+    # Per-machine fired record (protocol §3.10): which xloop mechanisms have ever
+    # run here. Needs no project.
+    [switch]$Fired
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'loop-common.ps1')
+
+if ($Fired) {
+    try {
+        $report = Get-XloopFiredReport
+        if ($AsJson) {
+            [ordered]@{ path = $report.Path; mechanisms = @($report.Rows); never_fired = @($report.NeverFired) } | ConvertTo-Json -Depth 4 -Compress
+        } else {
+            foreach ($line in (Format-XloopFiredReport -Report $report)) { Write-Output $line }
+        }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+}
+if (-not $Project) {
+    [Console]::Error.WriteLine('loop-status.ps1 requires -Project <path>, or -Fired for the per-machine fired record.')
+    exit 1
+}
 
 function Read-State {
     param([string]$Path)

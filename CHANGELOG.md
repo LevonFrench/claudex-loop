@@ -6,6 +6,7 @@ All notable changes to this custom fork are documented here.
 
 ### Added
 
+- xloop: S7 per-machine fired record. `loop-common.ps1` exports `Register-XloopFired -Mechanism <name> [-Acted]`, which keeps `~/.xloop/fired.json` (`XLOOP_HOME` overrides the directory) with first, last, count, and for guards acted, per mechanism: each wrapper, each named `loop-step.ps1` transition, format nudge, mutation restore, quota failover, resume fallback, visible and headless summons, and the pre-registered names ship-check, brief-check, live-harness, and provider-probe. Writes are atomic and tolerate a corrupt or missing file; names and timestamps only. `loop-status.ps1 -Fired` and `scripts/doctor.ps1` print the table and name every mechanism that has never fired.
 - XLoop wrappers now continue a quota-refused packet once through the alternate provider, symmetrically for Claude and Codex, while preserving packet guards, output validation, role separation, and bounded failure semantics. Dual exhaustion records `quota-exhausted`; generic rate-limit, auth, network, overload, and timeout failures remain ordinary tool failures.
 
 ### Fixed

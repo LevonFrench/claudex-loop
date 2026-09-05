@@ -111,6 +111,8 @@ No verbal recap is required. To inspect the checkpoint mechanically:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <xloop-skill>\scripts\loop-status.ps1 -Project X:\work\project
 ```
 
+To see which xloop mechanisms have ever run on this machine (wrappers, transitions, nudges, restores, failover, summon modes), run `loop-status.ps1 -Fired`; `scripts\doctor.ps1` prints the same table. The record lives in `~\.xloop\fired.json` and holds names and timestamps only.
+
 The locked v1 choices are:
 
 - Codex builder flag: `--dangerously-bypass-approvals-and-sandbox`

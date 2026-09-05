@@ -288,7 +288,12 @@ try {
         mutation_nudged = [string]$(if ($updates.Contains('mutation_nudged')) { $updates['mutation_nudged'] } elseif ($fields.Contains('mutation_nudged')) { $fields['mutation_nudged'] } else { '' })
     }
 
-    if (-not $WhatIfOnly) { Write-StateLines -Path $statePath -State $state -Updates $updates }
+    if (-not $WhatIfOnly) {
+        Write-StateLines -Path $statePath -State $state -Updates $updates
+        # Per-machine fired record (protocol §3.10): a replay counts as the mechanism
+        # running; only a real advance counts as it acting.
+        [void](Register-XloopFired -Mechanism ('transition:' + $Transition) -Acted:(-not $alreadyApplied))
+    }
     $result | ConvertTo-Json -Compress
     exit 0
 } catch {

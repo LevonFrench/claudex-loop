@@ -108,6 +108,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($prompt)) { throw 'Prompt file is empty.' }
     if ([string]::IsNullOrWhiteSpace($freshPrompt)) { throw 'Fresh fallback prompt file is empty.' }
     $claude = Resolve-AgentExecutable -Name 'claude' -ExplicitPath $ClaudePath
+    [void](Register-XloopFired -Mechanism 'wrapper:claude')
     $wantVisible = Get-LoopVisiblePreference -Visible:$Visible -Headless:$Headless
     $expectedTerminator = if ($Expect) { $Expect } else { Get-ExpectedTerminatorKind -OutputPath $outputPath }
 
@@ -143,6 +144,7 @@ try {
         $arguments += @('--strict-mcp-config', '--disable-slash-commands', '--output-format', 'json')
 
         $native = Invoke-NativeProcess -Executable $claude -Arguments $arguments -WorkingDirectory $root -TimeoutSeconds $TimeoutSec -Visible:$wantVisible -HandoffRoot (Join-Path $loopRoot 'tmp') -Guard $guard
+        [void](Register-XloopFired -Mechanism $(if ($native.Visible) { 'visible-summon' } else { 'headless-summon' }))
         # Restore before anything else reads .loop, so a mutation from this attempt
         # can never reach the fresh fallback packet or survive a later failure.
         [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
@@ -198,6 +200,10 @@ try {
     }
 
     [void](Update-GuardState -Guard $guard -Violations $violations -Appends $appends)
+    # Per-machine fired record (protocol §3.10): names and timestamps only.
+    [void](Register-XloopFired -Mechanism 'mutation-restore' -Acted:(@($violations).Count -gt 0))
+    if ($ResumeSession) { [void](Register-XloopFired -Mechanism 'resume-fallback' -Acted:$fallback) }
+    if ($quotaDetected) { [void](Register-XloopFired -Mechanism 'quota-failover' -Acted:(-not $DisableQuotaFailover)) }
 
     if ($null -eq $selectedEnvelope) {
         if ($quotaDetected -and -not $DisableQuotaFailover) {
@@ -291,6 +297,7 @@ try {
     $nudgeClass = ''
     if (-not $validation.Valid) { $nudgeClass = 'format' } elseif ($mutationCount -gt 0) { $nudgeClass = 'mutation' }
     $wrapperExit = if ($nudgeClass) { 2 } else { 0 }
+    [void](Register-XloopFired -Mechanism 'format-nudge' -Acted:($nudgeClass -eq 'format'))
     [void](Add-UsageLedgerRecord -LoopRoot $loopRoot -Tool 'claude' -OutputPath $outputPath -Telemetry $selectedTelemetry -Phase $Phase -Guard $guard)
 
     $metadata = [ordered]@{

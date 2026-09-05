@@ -119,6 +119,13 @@ $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-offline-smoke-' + [guid
 $expectedPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
 Assert-True -Condition ([IO.Path]::GetFullPath($tempRoot).StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) -Message 'Temporary root escaped the system temp directory.'
 
+# Every mechanism registration in this run lands in a throwaway xloop home, never
+# the real user profile (protocol §3.10). It outlives $tempRoot so the loop C
+# region at the end can inspect what the whole run fired.
+$firedHome = Join-Path ([IO.Path]::GetTempPath()) ('xloop-fired-home-' + [guid]::NewGuid().ToString('N'))
+$savedXloopHome = $env:XLOOP_HOME
+$env:XLOOP_HOME = $firedHome
+
 try {
     $mockBin = Join-Path $tempRoot 'mock bin'
     $mockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $mockBin)
@@ -818,6 +825,125 @@ try {
 } finally {
     if ([IO.Directory]::Exists($tempRoot)) { [IO.Directory]::Delete($tempRoot, $true) }
 }
+
+# ---- Scope loop C (S6, S7, S8) ----
+# Self-contained: the main temp root is gone by now, so this region builds its own
+# mock CLIs and project, and cleans up the shared fired home when it is done.
+$loopCRoot = Join-Path ([IO.Path]::GetTempPath()) ('xloop-loop-c-smoke-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($loopCRoot) | Out-Null
+$loopCSavedPath = $env:PATH
+try {
+    $common = Join-Path $repo 'skills\xloop\scripts\loop-common.ps1'
+    $stepScript = Join-Path $repo 'skills\xloop\scripts\loop-step.ps1'
+    $statusScript = Join-Path $repo 'skills\xloop\scripts\loop-status.ps1'
+    $initScript = Join-Path $repo 'skills\xloop\scripts\loop-init.ps1'
+    $codexWrapper = Join-Path $repo 'skills\xloop\scripts\loop-codex.ps1'
+    $claudeWrapper = Join-Path $repo 'skills\xloop\scripts\loop-claude.ps1'
+
+    # S7: the whole run above registered into the shared throwaway home. Both
+    # wrappers, the guards, and the failover case have fired there; the names owned
+    # by other loops are known but never fired. Nothing private is in the file.
+    $sharedFiredPath = Join-Path $firedHome 'fired.json'
+    Assert-True -Condition (Test-Path -LiteralPath $sharedFiredPath -PathType Leaf) -Message 'The smoke run did not create the per-machine fired record under XLOOP_HOME.'
+    $sharedFired = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')
+    Assert-True -Condition ($sharedFired.ExitCode -eq 0) -Message "loop-status.ps1 -Fired failed: $($sharedFired.Output)"
+    $sharedFiredJson = $sharedFired.Output | ConvertFrom-Json
+    Assert-True -Condition ($sharedFiredJson.path -eq $sharedFiredPath) -Message "-Fired read the wrong record: $($sharedFiredJson.path)"
+    $firedByName = @{}
+    foreach ($row in $sharedFiredJson.mechanisms) { $firedByName[$row.mechanism] = $row }
+    foreach ($expectedFired in @('wrapper:claude', 'wrapper:codex', 'headless-summon', 'mutation-restore', 'format-nudge', 'resume-fallback', 'quota-failover', 'transition:recon-to-interrogate', 'transition:record-nudge', 'transition:build-inspect')) {
+        Assert-True -Condition ($firedByName.ContainsKey($expectedFired) -and [bool]$firedByName[$expectedFired].fired -and [int]$firedByName[$expectedFired].count -ge 1) -Message "The smoke run should have fired $expectedFired."
+    }
+    Assert-True -Condition ([int]$firedByName['quota-failover'].acted -ge 1) -Message 'The failover smoke case did not record quota-failover as acted.'
+    Assert-True -Condition ([int]$firedByName['mutation-restore'].acted -ge 1 -and [int]$firedByName['mutation-restore'].count -gt [int]$firedByName['mutation-restore'].acted) -Message 'The mutation guard should have both run without acting and acted.'
+    Assert-True -Condition ([int]$firedByName['format-nudge'].acted -ge 1) -Message 'Malformed outputs did not record the format nudge as acted.'
+    Assert-True -Condition ([int]$firedByName['resume-fallback'].acted -ge 1) -Message 'Resume fallbacks did not record as acted.'
+    foreach ($neverExpected in @('ship-check', 'brief-check', 'live-harness', 'provider-probe')) {
+        Assert-True -Condition (@($sharedFiredJson.never_fired) -contains $neverExpected) -Message "Mechanism $neverExpected owned by another loop should be reported as never fired."
+        Assert-True -Condition ($firedByName.ContainsKey($neverExpected) -and [bool]$firedByName[$neverExpected].known) -Message "Mechanism $neverExpected is not in the known list."
+    }
+    $sharedFiredText = [IO.File]::ReadAllText($sharedFiredPath)
+    Assert-True -Condition ($sharedFiredText -notmatch 'Read the packet paths|mock-session|mock-thread') -Message 'The fired record leaked prompt text or a handle.'
+    Assert-True -Condition ($sharedFiredText -notmatch [regex]::Escape((Split-Path -Leaf $tempRoot))) -Message 'The fired record leaked a project path.'
+    Assert-True -Condition ($sharedFiredText -notmatch '(?i)[A-Z]:\\') -Message 'The fired record contains a machine path.'
+    $sharedFiredTable = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired')
+    Assert-True -Condition ($sharedFiredTable.ExitCode -eq 0 -and $sharedFiredTable.Output -match '(?m)^Never fired on this machine: .*\bship-check\b') -Message "The -Fired table did not name the never-fired mechanisms: $($sharedFiredTable.Output)"
+
+    # S7: a fresh home starts empty. One mock summon adds wrapper:claude while the
+    # failover stays never fired, until a failover is driven here.
+    $loopCMockBin = Join-Path $loopCRoot 'mock bin'
+    $loopCMockBuild = Invoke-ChildPowerShell -Script (Join-Path $PSScriptRoot 'new-mock-cli.ps1') -Arguments @('-OutputDirectory', $loopCMockBin)
+    Assert-True -Condition ($loopCMockBuild.ExitCode -eq 0) -Message "Loop C mock CLI build failed: $($loopCMockBuild.Output)"
+    $env:PATH = $loopCMockBin + [IO.Path]::PathSeparator + $env:PATH
+    $freshHome = Join-Path $loopCRoot 'fresh home'
+    $env:XLOOP_HOME = $freshHome
+    $loopCProject = Join-Path $loopCRoot 'loop c project'
+    [IO.Directory]::CreateDirectory($loopCProject) | Out-Null
+    $env:XLOOP_MOCK_MODE = 'bom'
+    $loopCInit = Invoke-ChildPowerShell -Script $initScript -Arguments @('-Project', $loopCProject, '-Author', 'claude', '-LoopName', 'loop-c-smoke')
+    Assert-True -Condition ($loopCInit.ExitCode -eq 0) -Message "Loop C project initialization failed: $($loopCInit.Output)"
+    $loopCPrompt = Join-Path $loopCProject '.loop\tmp\packet.txt'
+    [IO.File]::WriteAllText($loopCPrompt, 'Read the packet paths and return the required terminator.', (New-Object Text.UTF8Encoding($false)))
+    $loopCFresh = Join-Path $loopCProject '.loop\tmp\fresh packet.txt'
+    [IO.File]::WriteAllText($loopCFresh, 'FRESH PACKET: read the full-plan packet paths and return the required terminator.', (New-Object Text.UTF8Encoding($false)))
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $freshHome 'fired.json'))) -Message 'Initialization alone must not create the fired record.'
+    $firstSummon = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\rounds\fired-one.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($firstSummon.ExitCode -eq 0) -Message "Loop C first mock summon failed: $($firstSummon.Output)"
+    $freshFired = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')).Output | ConvertFrom-Json
+    $freshByName = @{}
+    foreach ($row in $freshFired.mechanisms) { $freshByName[$row.mechanism] = $row }
+    Assert-True -Condition ([bool]$freshByName['wrapper:claude'].fired -and [int]$freshByName['wrapper:claude'].count -eq 1) -Message 'One mock summon did not record wrapper:claude exactly once.'
+    Assert-True -Condition ($freshByName['wrapper:claude'].first -eq $freshByName['wrapper:claude'].last -and $freshByName['wrapper:claude'].first -match '^\d{4}-\d{2}-\d{2}T') -Message 'wrapper:claude first/last timestamps are malformed.'
+    Assert-True -Condition (-not [bool]$freshByName['wrapper:codex'].fired) -Message 'A Claude summon recorded the Codex wrapper.'
+    Assert-True -Condition (@($freshFired.never_fired) -contains 'quota-failover') -Message 'quota-failover must be never fired before a failover runs.'
+    Assert-True -Condition (@($freshFired.never_fired) -notcontains 'wrapper:claude') -Message 'wrapper:claude was still listed as never fired.'
+    $loopCCalls = Join-Path $loopCRoot 'calls.log'
+    $env:XLOOP_MOCK_CALLS_FILE = $loopCCalls
+    $env:XLOOP_MOCK_CLAUDE_MODE = 'quota'
+    $env:XLOOP_MOCK_CODEX_MODE = 'bom'
+    try {
+        $drivenFailover = Invoke-ChildPowerShell -Script $claudeWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-FreshPromptFile', '.loop\tmp\fresh packet.txt', '-OutFile', '.loop\rounds\fired-failover.md', '-TimeoutSec', '5')
+        Assert-True -Condition ($drivenFailover.ExitCode -eq 0) -Message "Loop C driven failover failed: $($drivenFailover.Output)"
+        Assert-True -Condition ((@([IO.File]::ReadAllLines($loopCCalls)) -join ',') -eq 'claude:quota,codex:bom') -Message 'Loop C failover did not cross to the alternate provider.'
+    } finally {
+        Remove-Item Env:XLOOP_MOCK_CALLS_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:XLOOP_MOCK_CLAUDE_MODE -ErrorAction SilentlyContinue
+        Remove-Item Env:XLOOP_MOCK_CODEX_MODE -ErrorAction SilentlyContinue
+    }
+    $afterFailover = (Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired', '-AsJson')).Output | ConvertFrom-Json
+    $afterByName = @{}
+    foreach ($row in $afterFailover.mechanisms) { $afterByName[$row.mechanism] = $row }
+    Assert-True -Condition (@($afterFailover.never_fired) -notcontains 'quota-failover') -Message 'quota-failover is still never fired after a driven failover.'
+    Assert-True -Condition ([int]$afterByName['quota-failover'].count -eq 1 -and [int]$afterByName['quota-failover'].acted -eq 1) -Message "quota-failover ran/acted counts are wrong: $($afterByName['quota-failover'] | ConvertTo-Json -Compress)"
+    Assert-True -Condition ([int]$afterByName['wrapper:codex'].count -eq 1) -Message 'The alternate wrapper did not register itself during failover.'
+    Assert-True -Condition ([int]$afterByName['wrapper:claude'].count -eq 2) -Message 'The second Claude summon did not increment wrapper:claude.'
+
+    # A corrupt record is tolerated: the next registration rewrites it, and a
+    # missing record never changes the summon's own result.
+    $freshFiredPath = Join-Path $freshHome 'fired.json'
+    [IO.File]::WriteAllText($freshFiredPath, '{"schema": 1, "mechanisms": ', (New-Object Text.UTF8Encoding($false)))
+    $afterCorrupt = Invoke-ChildPowerShell -Script $codexWrapper -Arguments @('-Project', $loopCProject, '-PromptFile', '.loop\tmp\packet.txt', '-OutFile', '.loop\rounds\fired-corrupt.md', '-TimeoutSec', '5')
+    Assert-True -Condition ($afterCorrupt.ExitCode -eq 0) -Message "A corrupt fired record changed a summon result: $($afterCorrupt.Output)"
+    $recovered = [IO.File]::ReadAllText($freshFiredPath) | ConvertFrom-Json
+    Assert-True -Condition ([int]$recovered.mechanisms.'wrapper:codex'.count -eq 1) -Message 'A corrupt fired record was not rewritten from empty.'
+    Remove-Item -LiteralPath $freshFiredPath -Force
+    $afterMissing = Invoke-ChildPowerShell -Script $statusScript -Arguments @('-Fired')
+    Assert-True -Condition ($afterMissing.ExitCode -eq 0 -and $afterMissing.Output -match 'Never fired on this machine: wrapper:claude') -Message "A missing fired record broke -Fired: $($afterMissing.Output)"
+    $directRegister = Invoke-ChildCommand -Command (". '$common'; Write-Output (Register-XloopFired -Mechanism 'provider-probe' -Acted); Write-Output ((Get-XloopFiredReport).NeverFired -contains 'provider-probe')")
+    Assert-True -Condition ((($directRegister.Output -split "`n") | ForEach-Object { $_.Trim() }) -join ',' -ceq 'True,False') -Message "Register-XloopFired is not callable directly: $($directRegister.Output)"
+    $loopCDoctor = Invoke-ChildPowerShell -Script (Join-Path $repo 'scripts\doctor.ps1') -Arguments @('-CodexPath', (Join-Path $loopCMockBin 'codex.exe'), '-ClaudePath', (Join-Path $loopCMockBin 'claude.exe'))
+    Assert-True -Condition ($loopCDoctor.Output -match 'Never fired on this machine: .*\bship-check\b') -Message "doctor.ps1 did not print the fired table: $($loopCDoctor.Output)"
+    $doctorJsonText = (($loopCDoctor.Output -split "`n") | Where-Object { $_ -notmatch '^(Fired record:|mechanism |Never fired|Every known|[a-z-]+(:[a-z-]+)? +(\d{4}-|never))' }) -join "`n"
+    $doctorJson = $doctorJsonText | ConvertFrom-Json
+    Assert-True -Condition (@($doctorJson.checks.fired.never_fired) -contains 'live-harness' -and @($doctorJson.checks.fired.mechanisms).Count -ge 29) -Message 'doctor.ps1 JSON does not carry the fired table.'
+} finally {
+    $env:PATH = $loopCSavedPath
+    Remove-Item Env:XLOOP_MOCK_MODE -ErrorAction SilentlyContinue
+    if ($null -eq $savedXloopHome) { Remove-Item Env:XLOOP_HOME -ErrorAction SilentlyContinue } else { $env:XLOOP_HOME = $savedXloopHome }
+    if ([IO.Directory]::Exists($loopCRoot)) { [IO.Directory]::Delete($loopCRoot, $true) }
+    if ([IO.Directory]::Exists($firedHome)) { [IO.Directory]::Delete($firedHome, $true) }
+}
+# ---- end loop C ----
 
 Write-Output 'Offline PowerShell 5.1 smoke tests passed.'
 exit 0
