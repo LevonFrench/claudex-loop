@@ -31,6 +31,16 @@ Read `verified-against` and `covers` from the brief. Use `git -C <project> diff 
 
 When Claude drives, patch only drifted brief sections immediately and bump `verified-against`. When Codex drives, write a candidate patch to the wiki inbox, append its path to `.loop/wiki-inbox.md`, and cite that patch in PLAN §E so round-1 review sees it alongside the stale compiled brief.
 
+## Check the brief's own claims
+
+The drift gate compares SHAs; it never checks that the brief's claims resolve. After the ledger draft exists, run the clerical brief truth gate in advisory mode:
+
+```powershell
+scripts/loop-brief-check.ps1 -Project <project> -Mode recon
+```
+
+It asserts that every path under Hot files, Pointers, and `covers` exists at HEAD, that every relative link in `wiki/_index.md` resolves, that `verified-against` is a reachable commit, and that the STATE `proof_cmd` executable resolves; it also reports a lesson or decision `supersedes:` target that does not exist. In recon mode it always exits `0`, appends one `unverified:` line per dangling claim to `.loop/ASSUMPTIONS.md`, and downgrades the `[brief]` tag of every assumption that cites a dangling path to `[inferred]`. Do not repair the wiki during recon: treat each `unverified:` line as evidence for interrogation and, when task-relevant, note the dangling claim in `.loop/wiki-inbox.md` so closeout fixes it.
+
 When the repository is indexed, prefer bounded `codebase-memory` graph queries to raw file reads. Count any source file opened to verify a graph result against the same recon file cap.
 
 ## No-wiki mode
