@@ -77,7 +77,15 @@ Passed before publication:
 - Git whitespace validation
 - Independent protocol/conformance audit
 
-Authenticated warm-wiki and no-wiki acceptance loops remain the final release gate. No stable tag should be created until both pass, including the forced mid-review cold-resume scenario.
+The live acceptance harness (`tests/live-loop.ps1`) is the final release gate. No stable tag should be created until it passes in both driver directions, including the forced mid-review kill and recap-free resume, and both summaries are recorded below.
+
+## Live acceptance record
+
+`tests/live-loop.ps1` writes one summary per scenario to `tests/out/live-loop-<author>-<wiki>-<stamp>.md` (with a `.json` twin), where `<author>` is the driving agent (`claude` or `codex`), `<wiki>` is `none`, `warm`, or `empty`, and `<stamp>` is the run's `yyyyMMddTHHmmss`. The driver transcripts and the disposable repository of each scenario stay beside it under `tests/out/work/<author>-<wiki>/`. `tests/out/` is untracked, so each authenticated run is recorded here by copying its summary block into this table; the per-machine fired record (`~/.xloop/fired.json`) additionally shows `live-harness` as fired once a run has happened on that machine.
+
+| run (stamp) | author | wiki | result | summary source |
+|---|---|---|---|---|
+| none recorded | | | | No authenticated run has been executed yet. The dry-run plumbing (`tests/live-loop.ps1 -DryRun`, mock CLIs) passes in both directions and is covered by the smoke suite; that is not an authenticated run. |
 
 Peer Sessions has its own ten gates. Passing them does not by itself close XLoop inspection finding B1.7; the XLoop release remains blocked until a guarded persistent-host integration or equivalent wrapper behavior is specified and accepted.
 
